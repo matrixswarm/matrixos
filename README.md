@@ -77,7 +77,7 @@ Each agent node specifies a name and lang. Example:
   { "name": "sentinel", "lang": "python", "universal_id": "guardian-1" }
 ````
 
-CoreSpawner resolves this to /matrix/agents/<lang>/<name>.<ext>.
+CoreSpawner resolves this to /matrix/agents/-lang-/-name-.-ext-
 
 Example: sentinel + python → /agents/python/sentinel.py
 

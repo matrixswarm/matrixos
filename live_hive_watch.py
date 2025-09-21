@@ -1,19 +1,43 @@
 import os
-import json
 import time
+import json
 import psutil
-import shutil
 from pathlib import Path
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
-def live_hive_watch(pod_root="pod", interval_sec=5):
+class PacketHandler(FileSystemEventHandler):
+    def __init__(self, activity_map):
+        self.activity_map = activity_map
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        if event.src_path.endswith(".json"):
+            agent = Path(event.src_path).parts[-3]  # comm/<agent>/incoming/file.json
+            self.activity_map[agent] = time.time()
+
+def live_hive_watch(base="/matrix/universes/runtime", universe="phoenix", interval_sec=5):
+    runtime_root = Path(base) / universe / "latest"
+    pod_root = runtime_root / "pod"
+    comm_root = runtime_root / "comm"
+
+    # Track packet activity
+    activity_map = {}
+
+    # Watch comm bus
+    event_handler = PacketHandler(activity_map)
+    observer = Observer()
+    observer.schedule(event_handler, str(comm_root), recursive=True)
+    observer.start()
+
     try:
         while True:
-            os.system('clear' if os.name == 'posix' else 'cls')
-            print("🧠 LIVE HIVE STATUS")
+            os.system("clear" if os.name == "posix" else "cls")
+            print(f"LIVE HIVE STATUS :: {universe.upper()}")
             print("="*80)
 
             now = time.time()
-            pod_root = Path(pod_root)
             agent_count = 0
 
             for pod_dir in pod_root.iterdir():
@@ -21,44 +45,44 @@ def live_hive_watch(pod_root="pod", interval_sec=5):
                 if not boot_file.exists():
                     continue
 
-                try:
-                    with open(boot_file, "r", encoding="utf-8") as f:
-                        boot_data = json.load(f)
+                with open(boot_file, "r", encoding="utf-8") as f:
+                    boot_data = json.load(f)
 
-                    universal_id = boot_data.get("universal_id")
-                    pid = boot_data.get("pid")
-                    cmdline = boot_data.get("cmd", [])
-                    boot_time = boot_data.get("boot_time", 0)
+                uid = boot_data.get("universal_id")
+                pid = boot_data.get("pid")
+                cmdline = boot_data.get("cmd", [])
 
-                    if not universal_id or not pid or not cmdline:
-                        continue
+                alive = False
+                uptime = 0
+                for proc in psutil.process_iter(['pid', 'cmdline', 'create_time']):
+                    if proc.info['pid'] == pid and proc.info['cmdline'] == cmdline:
+                        alive = True
+                        uptime = now - proc.info['create_time']
+                        break
 
-                    alive = False
-                    uptime = 0
-                    for proc in psutil.process_iter(['pid', 'cmdline', 'create_time']):
-                        try:
-                            if proc.info['pid'] == pid and proc.info['cmdline'] == cmdline:
-                                alive = True
-                                uptime = now - proc.info['create_time']
-                                break
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            continue
+                if alive:
+                    agent_count += 1
+                    last_packet = activity_map.get(uid, 0)
+                    since_last = now - last_packet if last_packet else None
 
-                    if alive:
-                        agent_count += 1
-                        print(f"🔵 {universal_id.ljust(20)} PID: {str(pid).ljust(7)} Uptime: {int(uptime)}s ({uptime/60:.1f} min)")
-                        print(f"   CMD: {' '.join(cmdline)}")
-                        print("-"*80)
+                    status = "🟢"
+                    if since_last and since_last > 30:
+                        status = "🟠"  # warn: stale comm
 
-                except Exception as e:
-                    print(f"[ERROR] Failed reading pod {pod_dir.name}: {e}")
+                    print(f"{status} {uid.ljust(20)} PID:{pid:<6} Uptime:{int(uptime)}s  ", end="")
+                    if since_last:
+                        print(f"Last packet {int(since_last)}s ago")
+                    else:
+                        print("No packets yet")
 
             print("="*80)
             print(f"✅ Agents Online: {agent_count}")
             time.sleep(interval_sec)
 
     except KeyboardInterrupt:
-        print("\n[EXIT] Live Hive Watcher terminated by operator.")
+        observer.stop()
+        print("\n[EXIT] Live Hive Watcher terminated.")
+    observer.join()
 
 if __name__ == "__main__":
     live_hive_watch()
