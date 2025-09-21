@@ -1,0 +1,29 @@
+{
+  "name": "sentinel",
+  "universal_id": "support_team_001",
+  "filesystem": {},
+  "config": {},
+  "children": [
+    {
+      "name": "gpt_reflex",
+      "universal_id": "gpt_reflex_001",
+      "filesystem": {},
+      "config": {},
+      "children": []
+    },
+    {
+      "name": "filewatch",
+      "universal_id": "filewatch_001",
+      "filesystem": {},
+      "config": {},
+      "children": []
+    },
+    {
+      "name": "uptime_pinger",
+      "universal_id": "uptime_pinger_001",
+      "filesystem": {},
+      "config": {},
+      "children": []
+    }
+  ]
+}

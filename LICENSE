@@ -1,0 +1,52 @@
+MatrixSwarm Community License v1.1 (Modified MIT)
+Copyright (c) 2024–2025 General Daniel F. MacDonald
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the “Software”), to use,
+modify, and distribute the Software, subject to the following conditions:
+
+1.  **Non-Commercial Use Only**
+
+    This license grants rights for personal, academic, research, and non-commercial development and use of the Software.
+
+    **"Non-Commercial Use"** specifically means any use where no revenue, profit, or other commercial gain is derived directly or indirectly from such use or from any products or services developed or offered using the Software. This includes, but is not limited to:
+    * Individual learning and personal projects.
+    * Academic research and educational purposes.
+    * Non-profit organizational use where no commercial benefit is generated.
+
+    Any use for profit, including but not limited to embedding the Software into commercial products, providing it as a Software-as-a-Service (SaaS), offering hosted services derived from the Software, or any other commercial distribution or monetization of the Software, **requires a separate commercial license.**
+
+    For commercial licensing inquiries, please contact: **swarm@matrixswarm.com**
+
+2.  **Attribution Required**
+
+    A visible and clear acknowledgment must appear in any fork, plugin, derived work, or distribution of the Software. This acknowledgment should state:
+
+        "Powered by MatrixSwarm — https://github.com/matrixswarm/matrixswarm"
+
+3.  **Trademark**
+
+    The names “MatrixSwarm” and “General Daniel F. MacDonald” are protected trademarks of General Daniel F. MacDonald. You may not use these marks in a way that suggests endorsement or affiliation with MatrixSwarm or General Daniel F. MacDonald without explicit written permission.
+
+4.  **No Warranty**
+
+    THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+5.  **Enforcement**
+
+    Unauthorized commercial use of the Software, or any other violation of the terms of this license, will be treated as a breach of contract and an infringement of copyright, and may result in legal action, including but not limited to claims for damages, injunctive relief, and recovery of legal costs.
+
+---
+
+**Understanding MatrixSwarm's Licensing:**
+
+MatrixSwarm is a file-based, AI-driven agent system designed for innovation. We encourage you to explore, build, and learn from it under the terms of this Community License. For any commercial application, partnership, or enterprise use, we invite you to reach out for a commercial licensing discussion. We believe in building a robust ecosystem while ensuring the sustainability and continued development of MatrixSwarm.
+
+Q: Can I fork MatrixSwarm and use it to build cool stuff for free?
+A: Yes — as long as you’re not selling it, embedding it in a product, or offering it as a paid service.
+
+Q: What counts as commercial use?
+A: Any revenue-generating deployment, including client services, SaaS hosting, paid apps, or resale.
+
+Q: I want to use MatrixSwarm commercially. What do I do?
+A: Contact swarm@matrixswarm.com for a license key and permission.
