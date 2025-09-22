@@ -84,7 +84,11 @@ class Agent(BootAgent):
         """
         self.log("[SENTINEL] Watch cycle started.")
 
+
         try:
+
+            print(f"{self.security_box}")
+
             if self.universal_id_under_watch and self.security_box:
                 # The security_box contains the credentials needed to resurrect Matrix
                 keychain = {}
@@ -106,6 +110,8 @@ class Agent(BootAgent):
 
                         universal_id = self.security_box.get('node').get("universal_id")
 
+                        self.log(f"[SENTINEL] Watching Universal ID: {universal_id}")
+
                         if not universal_id:
                             self.log("Target node missing universal_id. Breathing idle.", block="WATCHING")
                             break
@@ -118,31 +124,16 @@ class Agent(BootAgent):
                             continue
 
                         # Check if the target's heartbeat is stale
-                        result = check_heartbeats(self.path_resolution['comm_path'], universal_id)
-                        meta = result["meta"]
-                        threads = result["threads"]
-                        if meta["error_success"]:
-                            self.log(f"[HEARTBEAT] {universal_id} failed: {meta['error']}")
-                        else:
-                            # log failed threads with deltas
-                            for t, s in threads.items():
-                                if s["status"] == "failed":
-                                    self.log(
-                                        f"[HEARTBEAT] {universal_id}:{t} failed delta={s['delta']}s (timeout={s['timeout']})")
+                        if self.clear_to_spawn(self.command_line_args.get("universe"), universal_id):
 
-                            if all(s["status"] in ("alive", "sleeping") for s in threads.values()):
-                                continue
-
-                        if self.clear_to_spawn(self.command_line_args.get("universe"),
-                                               node.get("universal_id")):
-
+                            self.log(f"Re-spawning {universal_id}")
                             # If heartbeat is stale, initiate respawn
                             try:
 
                                 self.spawn_agent_direct(
                                     universe=self.command_line_args.get("universe"),
                                     spawner=keychain["security_box"]["spawner"],
-                                    universal_id=node.get("universal_id"),
+                                    universal_id=universal_id,
                                     agent_name=node.get("name"),
                                     tree_node=node,
                                     keychain=keychain

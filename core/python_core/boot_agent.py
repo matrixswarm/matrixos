@@ -1317,8 +1317,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                 #   for active propess in memroy
                 punji_file = os.path.join(self.path_resolution['comm_path'], universal_id, 'incoming', 'punji')
                 matches = find_jobs_by_prefix(universe, universal_id, match_mode="exact")
-                # job_prefix = f"{universe}:{spawner}:{universal_id}:{agent_name}"
-
+                # job_prefix = f"{universe}:{universal_id}"
                 # no matches - assumed no agent in memory
                 if not matches:
                     clear_to_spawn = True
@@ -1332,6 +1331,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                 # 2. If the punji file exists that means singleton_enforcement didn't shutdown the agent, it had 20secs(spawn_manager sleep interval * 1) to do so(bottom of this function interruptible_sleep(self, 20))
                 elif not os.path.exists(punji_file):
                     try:
+                        os.makedirs(punji_file, exist_ok=True)
                         Path(punji_file).write_text("ouch")
                         self.log(f"[BOOT][PUNJI] Dropped punji for {universal_id}")
                     except Exception as e:
@@ -1372,7 +1372,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             #this block is basically only given to a sentinel, that's the only one that would need this
             #len of keychain["security_box"] is checked because multiple iterations will cause it
             #to be overridden
-            if bool(cfg.get("matrix_secure_verified")) and len(keychain["security_box"])==4:
+            if bool(cfg.get("matrix_secure_verified")) and len(keychain["security_box"])==0:
                 self.log("[TRUST] matrix_secure_verified: TRUE → injecting real Matrix private key.")
                 keychain["security_box"]["encryption_enabled"] = int(self.encryption_enabled)
                 keychain["security_box"]["matrix_priv"] = self.matrix_priv
