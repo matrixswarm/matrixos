@@ -53,6 +53,35 @@ Sample Deployments:
 matrixd kill --universe phoenix --cleanup
 ````
 
+---
+## Remote Control & Security Notice
+
+**The official GUI for remote control, deployment, and monitoring of MatrixSwarm universes.**
+
+If you want to operate MatrixSwarm securely over the Internet, you **must** use [Phoenix Cockpit](https://github.com/matrixswarm/phoenix).
+
+- All remote commands, status, and logs are encrypted, signed, and relayed through the Phoenix cockpit using the `matrix_https` and `websocket-relay` agents.
+- No agent is exposed via open HTTP/S, and no API is available without a signed packet, trusted client certificate, and the Queen's signature.
+- **Without Phoenix, the Matrix Queen does not listen!**
+
+To connect and control a MatrixSwarm universe from anywhere, always run the cockpit:
+
+pip install -e . # in your Phoenix repo
+phoenix # launches the secure GUI
+
+Get Phoenix Cockpit here:
+👉 See: [Phoenix Cockpit](https://github.com/matrixswarm/phoenix)
+
+### Why can’t you just open MatrixOS to the net?
+
+- Direct agent communication is not exposed over HTTP/S by design (security: no untrusted RPC, no raw file bus).
+
+- Only Phoenix can sign, encrypt, and relay operator commands via the trusted HTTPS/WS agents.
+
+Running MatrixOS headless without Phoenix? Only use on private networks — or you’re not protected!
+---
+
+
 ## Matrix Boot Process Overview
 When matrixd boot --universe <name> is called, MatrixOS enters a multi-phase lifecycle:
 

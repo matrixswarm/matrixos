@@ -104,6 +104,29 @@ matrix_directive = {
                 },
             },
             {
+              "universal_id": "npc-simulator-1",
+              "name": "npc_simulator",
+              "app": "swarm-core",
+              "config": {
+                "grid_size": 20,
+                "npc_count": 100,
+                "tick_interval_sec": 1,
+                "service-manager": [{
+                  "role": [
+                    "npc.swarm.control@cmd_control_npcs",
+                    "npc.swarm.status@cmd_report_status"
+                  ],
+                  "scope": ["parent", "any"],
+                  "priority": {
+                    "npc.swarm.control": 1,
+                    "npc.swarm.status": 1,
+                    "default": 10
+                  },
+                  "exclusive": False
+                }]
+              }
+            },
+            {
             "universal_id": "apache_watchdog-1",
             "name": "apache_watchdog",
                 "config": {

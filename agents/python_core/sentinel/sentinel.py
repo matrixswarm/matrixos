@@ -84,10 +84,7 @@ class Agent(BootAgent):
         """
         self.log("[SENTINEL] Watch cycle started.")
 
-
         try:
-
-            print(f"{self.security_box}")
 
             if self.universal_id_under_watch and self.security_box:
                 # The security_box contains the credentials needed to resurrect Matrix
