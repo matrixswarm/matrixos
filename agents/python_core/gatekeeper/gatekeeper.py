@@ -192,7 +192,7 @@ class Agent(BootAgent):
 
         self._emit_beacon()
 
-        if not self.tail_thread.is_alive():
+        if not self.tail_thread or not self.tail_thread.is_alive():
             self.log("[GATEKEEPER] Starting tail_log thread…")
             self.tail_thread = threading.Thread(
                 target=self.tail_log,
