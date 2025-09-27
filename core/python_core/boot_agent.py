@@ -414,43 +414,41 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             self.log("[TREE-REQUEST][ERROR]", error=e)
 
     def enforce_singleton(self):
+        self.log("[ENFORCE] singleton loop starting...")
+        try:
+            while self.running:
+                try:
+                    job_label = DuplicateProcessCheck.get_self_job_label()
+                    if DuplicateProcessCheck.check_all_duplicate_risks(job_label=job_label, check_path=False):
+                        self.running = False
+                        self.log(
+                            f"[ENFORCE] {self.command_line_args['universal_id']} detected duplicate — standing down.")
+                    else:
+                        if self.debug.is_enabled():
+                            self.log(f"[ENFORCE] {self.command_line_args['universal_id']} is primary for job {job_label}.")
 
-        # LOOP FOR 20 SECS; IF AN INSTANCE MATCHES THE JOB TAG, KILL PROGRAM
-        # IF A DIE FILE IS FOUND IN THE INCOMING FOLDER, KILL PROGRAM
-        while self.running:
+                    path = os.path.join(self.path_resolution["comm_path_resolved"], "incoming")
 
-            # is there any duplicate processes that have duplicate cli --job leave if this process is younger
-            job_label = DuplicateProcessCheck.get_self_job_label()
+                    count, _ = FileFinderGlob.find_files_with_glob(path, pattern="die")
+                    if count > 0:
+                        self.running = False
+                        self.log(f"[ENFORCE] die.cookie ingested — going down easy...")
 
-            if DuplicateProcessCheck.check_all_duplicate_risks(job_label=job_label, check_path=False):
-                self.running = False
-                if self.debug.is_enabled():
-                    print(f"[ENFORCE] {self.command_line_args['universal_id']} detected a newer process with job label: --job {job_label} — standing down.")
-            else:
-                if self.debug.is_enabled():
-                    print(f"[ENFORCE] {self.command_line_args['universal_id']} verified as primary instance for --job {job_label} — proceeding with mission.")
-            # incoming:   die
-            # example: change {root}/comm/{universal_id}/incoming = {root}/comm/worker-1/incoming
-            #     look for die file in incoming only be 1 at anytime, and matrix command_thread will add/remove, spawn thread will
-            #     check
-            path = os.path.join(self.path_resolution["comm_path_resolved"], "incoming")
+                    if self.running:
+                        count, _ = FileFinderGlob.find_files_with_glob(path, pattern="punji")
+                        if count > 0:
+                            self.running = False
+                            self.log(f"[ENFORCE] hit punji — exiting...")
 
-            count, file_list = FileFinderGlob.find_files_with_glob(path, pattern="die")
-            if count > 0:
-                self.running = False
-                print(f"[INFO]core.python_core.agent.py: enforce_singleton: {self.command_line_args['universal_id']} die cookie ingested, going down easy...")
-                self.log(f"[INFO]core.python_core.agent.py: enforce_singleton: {self.command_line_args['universal_id']} die cookie ingested, going down easy...")
+                except Exception as inner:
+                    self.log(f"[ENFORCE][ERROR] loop iteration crashed: {inner}", error=inner)
 
-            if self.running:
-                count, file_list = FileFinderGlob.find_files_with_glob(path, pattern="punji")
-                if count > 0:
-                    self.running = False
-                    print(f"[ENFORCE] {self.command_line_args['universal_id']} hit punji — exiting...")
-                    self.log(f"[ENFORCE] {self.command_line_args['universal_id']} hit punji — exiting...")
+                interruptible_sleep(self, 1.5)
 
-            # within 3secs if another instance detected, and this is the younger of the die
-
-            interruptible_sleep(self, 1.5)
+        except Exception as outer:
+            self.log(f"[ENFORCE][FATAL] thread crashed: {outer}", error=outer)
+        finally:
+            self.log("[ENFORCE] loop exited, DONE")
 
     def monitor_threads(self):
         while self.running:

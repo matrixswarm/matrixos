@@ -178,7 +178,6 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(f"Unexpected restart error", error=e, level="ERROR", block="main_try")
 
-
     def persist(self, data):
         fname = f"ssh_{self.today()}.log"
         path = os.path.join(self.log_dir, fname)

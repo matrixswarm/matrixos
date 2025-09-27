@@ -12,9 +12,13 @@
 import time
 
 def interruptible_sleep(agent, seconds):
+    """
+    Sleep for `seconds`, checking agent.running frequently.
+    Supports floats (e.g. 1.5).
+    """
     end = time.time() + seconds
     while time.time() < end:
         if not agent.running:
             agent.log("[SLEEP] Interrupted sleep due to shutdown flag.")
             return
-        time.sleep(0.2)  # shorter tick, more responsive
+        time.sleep(0.2)  # short tick, responsive
