@@ -450,7 +450,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
             # within 3secs if another instance detected, and this is the younger of the die
 
-            interruptible_sleep(self, 3)
+            interruptible_sleep(self, 1.5)
 
     def monitor_threads(self):
         while self.running:
@@ -874,13 +874,14 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
                 #REMEMBER THIS ISN'T ENTERED LIKE PACKET_LISTENER
                 #THERE MAY BE A LARGE TIMEOUT IN WORKER
-
+                if not self.running:
+                    break
                 self.worker(config, identity)
 
             except Exception as e:
                 self.log(error=e, block="main_try")
 
-            time.sleep(1)
+            interruptible_sleep(self, 1)
 
         # Optional post-hook (called ONCE after loop exits)
         if hasattr(self, "worker_post"):
@@ -976,10 +977,10 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                         # Do nothing and let the queue act as a buffer of size 1.
                         pass
 
-                    time.sleep(delay)
+                    interruptible_sleep(self, delay)
                 except Exception as e:
                     self.log(error=e)
-                    time.sleep(min_delay)
+                    interruptible_sleep(self, min_delay)
 
         threading.Thread(target=dynamic_throttle_loop, daemon=True).start()
 

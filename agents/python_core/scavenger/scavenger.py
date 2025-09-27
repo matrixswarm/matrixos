@@ -45,6 +45,7 @@ class Agent(BootAgent):
     def scavenger_sweep(self):
         self.log("[SCAVENGER] Background sweep active. Scanning every 5 minutes...")
         while self.running:
+            self._emit_beacon()
             try:
                 now = time.time()
                 pod_root = self.path_resolution["pod_path"]

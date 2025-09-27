@@ -7,8 +7,8 @@ import sys
 import os
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
-
 import time
+from core.python_core.utils.swarm_sleep import interruptible_sleep
 from openai import OpenAI
 from core.python_core.boot_agent import BootAgent
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
@@ -43,8 +43,11 @@ class Agent(BootAgent):
             self.outbox_path = os.path.join(self.path_resolution["comm_path_resolved"], "outbox")
             os.makedirs(self.outbox_path, exist_ok=True)
             self.use_dummy_data = False
+            self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
         except Exception as e:
             self.log(error=e, block='main_try', level='ERROR')
+
+
 
     def post_boot(self):
         self.log(f"{self.NAME} v{self.AGENT_VERSION} – have a cookie.")
@@ -138,6 +141,17 @@ class Agent(BootAgent):
 
         except Exception as e:
             self.log(error=e, block='main_try', level='ERROR')
+
+    def worker(self, config=None, identity=None):
+        # emit beacon so Phoenix doesn’t mark it stale
+        if self.running:
+            self._emit_beacon()
+            interruptible_sleep(self, 5)  # responsive sleep
+            return
+
+        # shutdown path
+        self.log("[ORACLE] Shutdown requested, stopping worker.")
+        interruptible_sleep(self, .5)
 
 
 if __name__ == "__main__":

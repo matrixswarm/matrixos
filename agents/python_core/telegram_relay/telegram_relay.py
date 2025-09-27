@@ -30,7 +30,7 @@ class Agent(BootAgent):
 
     def worker(self, config: dict = None, identity: IdentityObject = None):
         self._emit_beacon()  # patrol beacon
-        interruptible_sleep(self, 30)
+        interruptible_sleep(self, 20)
 
     def worker_post(self):
         self.log("[TELEGRAM] Relay shutting down. No more echoes for now.")

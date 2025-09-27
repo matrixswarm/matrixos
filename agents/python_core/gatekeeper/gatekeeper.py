@@ -13,6 +13,7 @@ from core.python_core.boot_agent import BootAgent
 from core.python_core.utils.swarm_sleep import interruptible_sleep
 import geoip2.database
 import requests
+import threading
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 
 class Agent(BootAgent):
@@ -34,7 +35,7 @@ class Agent(BootAgent):
         self.cooldown_sec = 300
         self.interval=10
         self.last_alerts = {}
-
+        self.tail_thread = None
         cfg_db = str(cfg.get("maxmind_db", "")).strip()
 
         # If it's an absolute path or a path relative to install_path
@@ -45,7 +46,8 @@ class Agent(BootAgent):
 
         self.log_dir = os.path.join(self.path_resolution["comm_path"], "gatekeeper")
         os.makedirs(self.log_dir, exist_ok=True)
-        self._emit_beacon = self.check_for_thread_poke("tail_log", timeout=60, emit_to_file_interval=10)
+        self._emit_beacon = self.check_for_thread_poke("worker", timeout=30, emit_to_file_interval=10)
+        self._emit_beacon_tail_log = self.check_for_thread_poke("tail_log", timeout=60, emit_to_file_interval=10)
 
     def should_alert(self, key):
 
@@ -128,13 +130,13 @@ class Agent(BootAgent):
     def tail_log(self):
 
         self.log(f"[GATEKEEPER] Tailing: {self.log_path}")
-        self._emit_beacon()
+        self._emit_beacon_tail_log()
         try:
             with subprocess.Popen(["tail", "-n", "0", "-F", self.log_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
                 if proc.stdout is None:
                     self.log("[GATEKEEPER] ❌ tail stdout unavailable, aborting.")
                 for line in proc.stdout:
-                    self._emit_beacon()
+                    self._emit_beacon_tail_log()
                     if "Accepted" in line and "from" in line:
                         try:
                             timestamp = " ".join(line.strip().split()[0:3])
@@ -186,12 +188,18 @@ class Agent(BootAgent):
     def today(self):
         return datetime.now().strftime("%Y-%m-%d")
 
-    def worker(self, config:dict = None, identity:IdentityObject = None):
+    def worker(self, config: dict = None, identity: IdentityObject = None):
 
-        try:
-            self.tail_log()
-        except Exception as e:
-            self.log("[GATEKEEPER] tail_log crashed in worker, respawning...", error=e)
+        self._emit_beacon()
+
+        if not self.tail_thread.is_alive():
+            self.log("[GATEKEEPER] Starting tail_log thread…")
+            self.tail_thread = threading.Thread(
+                target=self.tail_log,
+                name="gatekeeper_tail_log",
+                daemon=True
+            )
+            self.tail_thread.start()
 
         interruptible_sleep(self, self.interval)
 

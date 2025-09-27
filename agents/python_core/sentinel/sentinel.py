@@ -14,7 +14,6 @@ sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 import threading
 
-from core.python_core.class_lib.time_utils.heartbeat_checker import check_heartbeats
 from core.python_core.utils.swarm_sleep import interruptible_sleep
 from core.python_core.boot_agent import BootAgent
 

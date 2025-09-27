@@ -20,6 +20,8 @@ class Agent(BootAgent):
 
         try:
 
+            self._emit_beacon()
+
             if config and "target" in config:
                 self.target = config["target"]
                 self.log(f"[HEALTH] Updated probe target: {self.target}")
@@ -33,6 +35,7 @@ class Agent(BootAgent):
                 self.dispatch_report(report)
         except Exception as e:
             self.log(f"[HEALTH][ERROR] {e}")
+
 
         interruptible_sleep(self, self.interval)
 

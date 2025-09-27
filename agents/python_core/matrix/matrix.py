@@ -52,6 +52,7 @@ from core.python_core.class_lib.packet_delivery.utility.security.packet_size imp
 from core.python_core.class_lib.packet_delivery.utility.encryption.verify_packet_signature import verify_packet_signature
 from core.python_core.class_lib.time_utils.heartbeat_checker import check_heartbeats
 from core.python_core.utils.analyze_spawn_records import analyze_spawn_records
+from core.python_core.utils.swarm_sleep import interruptible_sleep
 class Agent(BootAgent):
     """The root agent and central authority of the MatrixSwarm.
     As the first agent spawned by the bootloader, the Matrix agent acts as
@@ -135,6 +136,8 @@ class Agent(BootAgent):
                     self.path_resolution["comm_path_resolved"],
                     "payload"
                 )
+
+            self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
 
         except Exception as e:
             self.log(error=e, level="ERROR")
@@ -222,6 +225,20 @@ class Agent(BootAgent):
         except Exception as e:
             self.log("[ACL] Pipeline error", error=e)
             return False
+
+    def worker(self, config=None, identity=None):
+        """
+        Keep Matrix responsive and allow graceful shutdown.
+        """
+        if self.running:
+            # Emit a beacon so Phoenix marks Matrix as alive
+            self._emit_beacon()
+            interruptible_sleep(self, 5)  # short, interruptible sleep
+            return
+
+        # Shutdown path
+        self.log("[MATRIX] Shutdown requested, stopping worker.")
+        interruptible_sleep(self, 0.5)
 
     def pre_boot(self):
         message = "Knock... Knock... Knock... The Matrix has you..."

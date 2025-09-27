@@ -189,15 +189,6 @@ class Agent(BootAgent):
             peer_pub_pem = signing_cfg.get("remote_pubkey")
             self.peer_pub_key = RSA.import_key(peer_pub_pem.encode()) if peer_pub_pem else None
 
-            # Baseline process liveness
-            self._emit_process_beacon = self.check_for_thread_poke(
-                "https_process", timeout=60, emit_to_file_interval=10
-            )
-
-            # True service liveness
-            self._emit_beacon = self.check_for_thread_poke(
-                "https_service", timeout=60, emit_to_file_interval=10
-            )
 
             self.log(f"[SERVER-CERT-DEBUG] uid={self.command_line_args['universal_id']} "
                   f"cert_len={len(cert_pem or '')} "
@@ -207,6 +198,8 @@ class Agent(BootAgent):
 
             self.log("[CERT-LOADER] In-memory TLS certs loaded successfully.")
             self.configure_routes()
+            # True service liveness
+            self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
 
 
         except Exception as e:
@@ -218,7 +211,6 @@ class Agent(BootAgent):
         # keep trying to start for infinity: false do max retries in method
         self.run_server_retries = False
         self._last_dir_request = 0
-        self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
 
     def pre_boot(self):
         """
@@ -258,6 +250,30 @@ class Agent(BootAgent):
         """
         self.log("[MATRIX_HTTPS] Boot initialized. Port online, certs verified.")
 
+    def worker(self, config=None, identity=None):
+        """
+        Main loop hook for Matrix HTTPS agent.
+        This keeps emitting a heartbeat and respects die.cookie / rug_pull.
+        """
+        if not self.running:
+            return
+
+        # emit a liveness beacon so Phoenix sees this agent alive
+        self._emit_beacon()
+
+        # Also double-check that the Flask server is still healthy
+        try:
+            with self.app.test_client() as client:
+                resp = client.get("/ping")
+                if resp.status_code == 200:
+                    self._emit_beacon()
+                else:
+                    self.log(f"[MATRIX-HTTPS][ERROR] Worker ping unhealthy: {resp.status_code}")
+        except Exception as e:
+            self.log("[MATRIX-HTTPS][ERROR] Worker ping failed", error=e)
+
+        interruptible_sleep(self, 15)
+
     def service_monitor(self):
         """
         Continuously self-pings the Flask `/ping` route to prove HTTPS stack health.
@@ -266,17 +282,19 @@ class Agent(BootAgent):
         It uses a Flask test client to make a GET request to a local endpoint,
         and if the response is successful, it emits a liveness beacon.
         """
+        emit_beacon = self.check_for_thread_poke("service_monitor", timeout=60, emit_to_file_interval=10)
         while self.running:
             try:
                 with self.app.test_client() as client:
                     resp = client.get("/ping")
                     if resp.status_code == 200:
-                        self._emit_beacon()
+                        emit_beacon()
                     else:
                         self.log(f"[MATRIX-HTTPS][ERROR] Ping route unhealthy: {resp.status_code}")
             except Exception as e:
                 self.log("[MATRIX-HTTPS][ERROR] Internal ping failed", error=e)
-            interruptible_sleep(self, 30)
+
+            interruptible_sleep(self, 20)
 
     def worker_post(self):
         """
@@ -506,9 +524,10 @@ class Agent(BootAgent):
 
                 # Start process liveness thread
                 def process_monitor():
+                    emit_beacon = self.check_for_thread_poke("process_monitor", timeout=60, emit_to_file_interval=10)
                     while self.running:
-                        self._emit_process_beacon()
-                        interruptible_sleep(self, 30)
+                        emit_beacon()
+                        interruptible_sleep(self, 20)
 
                 # Run the HTTPS server loop in its own thread
                 threading.Thread(target=httpd.serve_forever, daemon=True).start()

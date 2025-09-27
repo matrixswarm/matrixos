@@ -43,10 +43,13 @@ class Agent(BootAgent):
     def worker(self, config:dict = None, identity:IdentityObject = None):
 
 
-        if not self.mail:
-            return  # Connection failed during pre
 
         try:
+
+            self._emit_beacon()
+            if not self.mail:
+                return  # Connection failed during pre
+
             result, data = self.mail.search(None, 'UNSEEN')
             if result != 'OK' or not data or not data[0]:
                 return
