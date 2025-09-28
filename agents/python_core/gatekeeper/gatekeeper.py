@@ -44,9 +44,9 @@ class Agent(BootAgent):
         else:
             self.mmdb_path = os.path.join(self.path_resolution["install_path"], "maxmind", "GeoLite2-City.mmdb")
 
-        self.log_dir = os.path.join(self.path_resolution["comm_path"], "gatekeeper")
+        self.log_dir = os.path.join(self.path_resolution["static_comm_path_resolved"], "logs")
         os.makedirs(self.log_dir, exist_ok=True)
-        self._emit_beacon = self.check_for_thread_poke("worker", timeout=30, emit_to_file_interval=10)
+        self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
         self._emit_beacon_tail_log = self.check_for_thread_poke("tail_log", timeout=60, emit_to_file_interval=10)
 
     def should_alert(self, key):
@@ -128,55 +128,114 @@ class Agent(BootAgent):
             self.pass_packet(pk1, ep.get_universal_id())
 
     def tail_log(self):
-
         self.log(f"[GATEKEEPER] Tailing: {self.log_path}")
         self._emit_beacon_tail_log()
         try:
-            with subprocess.Popen(["tail", "-n", "0", "-F", self.log_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+            with subprocess.Popen(
+                    ["tail", "-n", "0", "-F", self.log_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1
+            ) as proc:
                 if proc.stdout is None:
                     self.log("[GATEKEEPER] ❌ tail stdout unavailable, aborting.")
-                for line in proc.stdout:
+                    return
+
+                last_emit = time.time()
+
+                while True:
+                    line = proc.stdout.readline()
+
+                    # heartbeat even if no new line
+                    now = time.time()
+                    if now - last_emit >= 30:  # configurable
+                        self._emit_beacon_tail_log()
+                        last_emit = now
+
+                    if not line:
+                        # tail ended or rotated, break to restart
+                        if proc.poll() is not None:
+                            self.log("[GATEKEEPER] tail process exited, restarting…")
+                            break
+                        continue
+
+                    # normal log parsing continues here
                     self._emit_beacon_tail_log()
-                    if "Accepted" in line and "from" in line:
-                        try:
-                            timestamp = " ".join(line.strip().split()[0:3])
-                            if "password" in line:
-                                auth_method = "password"
-                            elif "publickey" in line:
-                                auth_method = "public key"
-                            else:
-                                auth_method = "unknown"
-
-                            user = line.split("for")[1].split("from")[0].strip()
-                            ip = line.split("from")[1].split()[0].strip()
-
-                            try:
-                                ipaddress.ip_address(ip)
-                            except ValueError:
-                                self.log(f"[GATEKEEPER][SKIP] Invalid IP: {ip}")
-                                return
-
-                            tty = "unknown"
-                            geo = self.resolve_ip(ip)
-                            alert_data = {
-                                "user": user,
-                                "ip": ip,
-                                "tty": tty,
-                                "auth_method": auth_method,
-                                "timestamp": timestamp,
-                                **geo
-                            }
-
-                            if self.should_alert(ip):
-                                self.drop_alert(alert_data)
-
-                            self.persist(alert_data)
-
-                        except Exception as e:
-                            self.log(f"[GATEKEEPER][PARSER][ERROR] Failed to parse login line: {e}")
+                    last_emit = now
+                    self._process_login_line(line)
 
         except Exception as e:
-            self.log(f"Unexpected restart error", error=e, level="ERROR", block="main_try")
+            self.log("[GATEKEEPER][ERROR] tail_log exception", error=e)
+
+    def _process_login_line(self, line: str):
+        line = line.strip()
+        if not line:
+            return
+
+        try:
+            # ✅ Successful logins
+            if "Accepted" in line and "from" in line:
+                timestamp = " ".join(line.split()[0:3])
+
+                if "password" in line:
+                    auth_method = "password"
+                elif "publickey" in line:
+                    auth_method = "public key"
+                else:
+                    auth_method = "unknown"
+
+                user = line.split("for")[1].split("from")[0].strip()
+                ip = line.split("from")[1].split()[0].strip()
+
+                try:
+                    ipaddress.ip_address(ip)
+                except ValueError:
+                    self.log(f"[GATEKEEPER][SKIP] Invalid IP: {ip}")
+                    return
+
+                tty = "unknown"
+                geo = self.resolve_ip(ip)
+                alert_data = {
+                    "event": "ssh_login_success",
+                    "user": user,
+                    "ip": ip,
+                    "tty": tty,
+                    "auth_method": auth_method,
+                    "timestamp": timestamp,
+                    **geo
+                }
+
+                self.drop_alert(alert_data)
+                self.persist(alert_data)
+
+            # ⚠️ Failed logins (optional, disabled by default)
+            elif self.tree_node.get("alert_failures", False) and "Failed password" in line and "from" in line:
+                timestamp = " ".join(line.split()[0:3])
+                user = line.split("for")[1].split("from")[0].strip()
+                ip = line.split("from")[1].split()[0].strip()
+
+                try:
+                    ipaddress.ip_address(ip)
+                except ValueError:
+                    self.log(f"[GATEKEEPER][SKIP] Invalid IP: {ip}")
+                    return
+
+                geo = self.resolve_ip(ip)
+                alert_data = {
+                    "event": "ssh_login_failed",
+                    "user": user,
+                    "ip": ip,
+                    "auth_method": "password",
+                    "timestamp": timestamp,
+                    **geo
+                }
+
+                self.drop_alert(alert_data)
+                self.persist(alert_data)
+
+        except Exception as e:
+            self.log(f"[GATEKEEPER][PARSER][ERROR] Failed to parse login line: {e}")
 
     def persist(self, data):
         fname = f"ssh_{self.today()}.log"

@@ -512,6 +512,10 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             self.post_boot()
             self.monitor_threads()
 
+            #clear you're own punji file
+            punji_file = os.path.join(self.path_resolution['comm_path'], self.command_line_args['universal_id'], 'incoming', 'punji')
+            os.remove(punji_file)
+
         except Exception as e:
             self.log(error=e, block="main-try")
 
@@ -1314,7 +1318,8 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
                 # 1. Check the process list for agent with cmd line --job {universe=universe, defaults to ai}:{spawner=parent agent, obviously this agent}:{universal_id=agent getting spawned}:{agent_name=actual agent being spawned comm/<agent><agent>}
                 #   for active propess in memroy
-                punji_file = os.path.join(self.path_resolution['comm_path'], universal_id, 'incoming', 'punji')
+                punji_dir = os.path.join(self.path_resolution['comm_path'], universal_id, 'incoming')
+                punji_file = os.path.join(punji_dir, 'punji')
                 matches = find_jobs_by_prefix(universe, universal_id, match_mode="exact")
                 # job_prefix = f"{universe}:{universal_id}"
                 # no matches - assumed no agent in memory
@@ -1330,7 +1335,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                 # 2. If the punji file exists that means singleton_enforcement didn't shutdown the agent, it had 20secs(spawn_manager sleep interval * 1) to do so(bottom of this function interruptible_sleep(self, 20))
                 elif not os.path.exists(punji_file):
                     try:
-                        os.makedirs(punji_file, exist_ok=True)
+                        os.makedirs(punji_dir, exist_ok=True)
                         Path(punji_file).write_text("ouch")
                         self.log(f"[BOOT][PUNJI] Dropped punji for {universal_id}")
                     except Exception as e:

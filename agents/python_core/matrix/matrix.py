@@ -689,7 +689,6 @@ class Agent(BootAgent):
             # 🚚 Deliver to the right place
             self.pass_packet(pk, target)
 
-
         except Exception as e:
             self.log(error=e, block="main_try")
 
