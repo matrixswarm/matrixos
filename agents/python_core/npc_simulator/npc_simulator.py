@@ -17,6 +17,10 @@ class Agent(BootAgent):
         cfg = self.tree_node.get("config", {})
         self.grid_size = int(cfg.get("grid_size", 20))
         self.npc_count = int(cfg.get("npc_count", 100))
+        self.scatter_ticks = 0
+        self.ping_ticks = 0
+        self.shield_ticks = 0
+        self.lock_ticks = 0
 
         # Sentinel settings
         self.stream_interval = 1.5       # seconds between ticks
@@ -68,6 +72,15 @@ class Agent(BootAgent):
         role = npc["role"]
         x, y = npc["x"], npc["y"]
 
+        if self.lock_ticks > 0:
+            return  # NPCs frozen in place
+
+        if self.scatter_ticks > 0:
+            dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+            npc["x"] = max(0, min(gx, x + dx))
+            npc["y"] = max(0, min(gx, y + dy))
+            return
+
         def move(dx, dy):
             nx = max(0, min(gx, x + dx))
             ny = max(0, min(gx, y + dy))
@@ -77,18 +90,23 @@ class Agent(BootAgent):
                 npc["x"], npc["y"] = nx, ny
 
         if role == "scout":
-            # Random walk + player spotting
             dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1), (0, 0)])
             move(dx, dy)
-            if abs(npc["x"] - px) + abs(npc["y"] - py) < 4:
+
+            detection_radius = 6 if self.ping_ticks > 0 else 4
+            if abs(npc["x"] - px) + abs(npc["y"] - py) < detection_radius:
                 self.last_seen_player = (px, py)
 
+
         elif role == "hunter":
-            # Path toward last seen player, prefer horizontal first
             if self.last_seen_player:
                 tx, ty = self.last_seen_player
                 dx = 1 if x < tx else -1 if x > tx else 0
                 dy = 1 if y < ty else -1 if y > ty else 0
+                if self.shield_ticks > 0:
+                    # reverse direction (repelled from player)
+                    dx, dy = -dx, -dy
+
                 if random.random() < 0.6:
                     move(dx, 0)
                 else:
@@ -145,12 +163,28 @@ class Agent(BootAgent):
     def cmd_control_npcs(self, content, packet, identity=None):
         action = content.get("action", "idle")
         self.log(f"[NPC] Control command received: {content}")
+
         if action == "scatter":
             self.last_seen_player = None
-            self.log("[NPC] Scatter command received.")
+            self.scatter_ticks = 3  # jitter for a few ticks
+            self.log("[NPC] Scatter command received — swarm destabilizing!")
+
         elif action == "hunt":
             self.last_seen_player = self.player
             self.log("[NPC] Hunt command received.")
+
+        elif action == "ping":
+            self.ping_ticks = 2
+            self.log("[NPC] 🔔 Ping! Scouts scanning wider.")
+
+        elif action == "shield":
+            self.shield_ticks = 5
+            self.log("[NPC] 🛡️ Shield activated — swarm repelled from player.")
+
+        elif action == "lock":
+            self.lock_ticks = 5
+            self.log("[NPC] 🔒 Lockdown engaged — swarm frozen.")
+
         else:
             self.log(f"[NPC] Unknown action: {action}")
 
@@ -178,6 +212,15 @@ class Agent(BootAgent):
                 for npc in self.npcs:
                     self._step_npc(npc)
 
+                if self.scatter_ticks > 0:
+                    self.scatter_ticks -= 1
+                if self.ping_ticks > 0:
+                    self.ping_ticks -= 1
+                if self.shield_ticks > 0:
+                    self.shield_ticks -= 1
+                if self.lock_ticks > 0:
+                    self.lock_ticks -= 1
+
                 px, py = self.player
                 self.player = (
                     max(0, min(self.grid_size - 1, px + random.choice([-1, 0, 0, 1]))),
@@ -200,6 +243,7 @@ class Agent(BootAgent):
                 "universal_id": self.tree_node.get("universal_id"),
                 "session_id": sess_id,
                 "token": token,
+                "last_seen_player": self.last_seen_player,
                 "player_pos": self.player,
                 "npc_list": self.npcs,
                 "timestamp": int(time.time())
