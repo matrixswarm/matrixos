@@ -19,7 +19,7 @@ class Agent(BootAgent):
         self.npc_count = int(cfg.get("npc_count", 100))
 
         # Sentinel settings
-        self.stream_interval = 1.0       # seconds between ticks
+        self.stream_interval = 1.5       # seconds between ticks
         self.max_flag_age_sec = 60       # expire stale sessions
         self.active_streams = {}         # {sess_id: {thread, stop, token, handler}}
 
@@ -45,29 +45,65 @@ class Agent(BootAgent):
         self.log(f"{self.NAME} v{self.AGENT_VERSION} – a strange game. The only winning move is not to play.")
 
     def _init_npcs(self):
-        roles = ["scout"]*10 + ["hunter"]*30 + ["follower"]*60
+        roles = ["scout"] * 10 + ["hunter"] * 30 + ["follower"] * 60
+        taken = set()
         for i, role in enumerate(roles[:self.npc_count]):
+            while True:
+                x, y = random.randint(0, self.grid_size - 1), random.randint(0, self.grid_size - 1)
+                if (x, y) not in taken:
+                    taken.add((x, y))
+                    break
             self.npcs.append({
                 "id": i,
                 "role": role,
-                "x": random.randint(0, self.grid_size-1),
-                "y": random.randint(0, self.grid_size-1),
+                "x": x,
+                "y": y,
                 "target": None
             })
 
     # === NPC Behaviors ===
     def _step_npc(self, npc):
         px, py = self.player
-        if npc["role"] == "scout":
-            dx, dy = random.choice([(1,0),(-1,0),(0,1),(0,-1),(0,0)])
-            npc["x"] = max(0, min(self.grid_size-1, npc["x"]+dx))
-            npc["y"] = max(0, min(self.grid_size-1, npc["y"]+dy))
-            if abs(npc["x"]-px)+abs(npc["y"]-py) < 4:
+        gx = self.grid_size - 1
+        role = npc["role"]
+        x, y = npc["x"], npc["y"]
+
+        def move(dx, dy):
+            nx = max(0, min(gx, x + dx))
+            ny = max(0, min(gx, y + dy))
+
+            # Prevent stacking by checking if another NPC is already at (nx, ny)
+            if not any(n["x"] == nx and n["y"] == ny for n in self.npcs if n is not npc):
+                npc["x"], npc["y"] = nx, ny
+
+        if role == "scout":
+            # Random walk + player spotting
+            dx, dy = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1), (0, 0)])
+            move(dx, dy)
+            if abs(npc["x"] - px) + abs(npc["y"] - py) < 4:
                 self.last_seen_player = (px, py)
-        elif npc["role"] in ("hunter", "follower") and self.last_seen_player:
-            tx, ty = self.last_seen_player
-            npc["x"] += 1 if npc["x"] < tx else -1 if npc["x"] > tx else 0
-            npc["y"] += 1 if npc["y"] < ty else -1 if npc["y"] > ty else 0
+
+        elif role == "hunter":
+            # Path toward last seen player, prefer horizontal first
+            if self.last_seen_player:
+                tx, ty = self.last_seen_player
+                dx = 1 if x < tx else -1 if x > tx else 0
+                dy = 1 if y < ty else -1 if y > ty else 0
+                if random.random() < 0.6:
+                    move(dx, 0)
+                else:
+                    move(0, dy)
+
+        elif role == "follower":
+            # Seek hunter cluster
+            hx = [n["x"] for n in self.npcs if n["role"] == "hunter"]
+            hy = [n["y"] for n in self.npcs if n["role"] == "hunter"]
+            if hx and hy:
+                avg_hx = sum(hx) // len(hx)
+                avg_hy = sum(hy) // len(hy)
+                dx = 1 if x < avg_hx else -1 if x > avg_hx else 0
+                dy = 1 if y < avg_hy else -1 if y > avg_hy else 0
+                move(dx, dy)
 
     # === Commands ===
     def cmd_start_npc_stream(self, content, packet, identity=None):
@@ -108,6 +144,7 @@ class Agent(BootAgent):
 
     def cmd_control_npcs(self, content, packet, identity=None):
         action = content.get("action", "idle")
+        self.log(f"[NPC] Control command received: {content}")
         if action == "scatter":
             self.last_seen_player = None
             self.log("[NPC] Scatter command received.")
@@ -140,6 +177,12 @@ class Agent(BootAgent):
                 # update NPCs
                 for npc in self.npcs:
                     self._step_npc(npc)
+
+                px, py = self.player
+                self.player = (
+                    max(0, min(self.grid_size - 1, px + random.choice([-1, 0, 0, 1]))),
+                    max(0, min(self.grid_size - 1, py + random.choice([-1, 0, 0, 1])))
+                )
 
                 # broadcast frame
                 self._broadcast_frame(sess, token, handler)

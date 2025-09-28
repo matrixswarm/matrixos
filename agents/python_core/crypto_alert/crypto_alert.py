@@ -71,7 +71,6 @@ class Agent(BootAgent):
 
             else:
 
-
                 trigger = self._private_config.get("trigger_type", "price_change_above")
 
                 # Break it into base + direction (e.g., price_change_above → price_change + above)
