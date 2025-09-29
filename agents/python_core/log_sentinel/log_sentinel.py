@@ -46,8 +46,7 @@ class Agent(BootAgent):
                 self.key_bytes = base64.b64decode(swarm_key)
 
             self._signing_keys = self.tree_node.get('config', {}).get('security', {}).get('signing', {})
-            self._has_signing_keys = bool(self._signing_keys.get('privkey')) and bool(
-                self._signing_keys.get('remote_pubkey'))
+            self._has_signing_keys = bool(self._signing_keys.get('privkey')) and bool( self._signing_keys.get('remote_pubkey'))
 
             if self._has_signing_keys:
                 priv_pem = self._signing_keys.get("privkey")

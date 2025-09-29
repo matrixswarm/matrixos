@@ -9,8 +9,10 @@ from flask import Flask, request, jsonify
 import threading
 import time
 import ssl
+import secrets
 from Crypto.PublicKey import RSA
-from core.python_core.utils.crypto_utils import pem_fix
+import base64
+import json
 from werkzeug.serving import WSGIRequestHandler
 from core.python_core.utils.cert_loader import load_cert_chain_from_memory
 from core.python_core.boot_agent import BootAgent
@@ -19,7 +21,7 @@ from core.python_core.class_lib.packet_delivery.utility.security.packet_size imp
 from core.python_core.utils import crypto_utils
 from core.python_core.utils.swarm_sleep import interruptible_sleep
 from werkzeug.serving import make_server
-
+from core.python_core.utils.crypto_utils import encrypt_with_ephemeral_aes,  sign_data, pem_fix
 class CustomRequestHandler(WSGIRequestHandler):
     """
     A custom WSGI request handler that retrieves the client's TLS certificate.
@@ -147,13 +149,14 @@ class Agent(BootAgent):
         self.app = Flask(__name__)
         self.port = 65431
 
-        config = self.tree_node.get("config", {})
-        self.allowlist_ips = config.get("allowlist_ips", [])
-
-        self.payload_dir = os.path.join(self.path_resolution['comm_path'], "matrix", "payload")
-
         try:
-            security = self.tree_node.get("config", {}).get("security", {}) or {}
+
+            config = self.tree_node.get("config", {})
+            self.allowlist_ips = config.get("allowlist_ips", [])
+
+            self.payload_dir = os.path.join(self.path_resolution['comm_path'], "matrix", "payload")
+
+            security = config.get("security", {}) or {}
             conn = security.get("connection", {}) or {}
 
             server_cert = conn.get("server_cert", {}) or {}
@@ -164,7 +167,6 @@ class Agent(BootAgent):
             cert_pem = server_cert.get("cert")
             key_pem = server_cert.get("key")
             ca_pem = ca_root.get("cert")
-
 
             if not cert_pem or not key_pem:
                 raise ValueError("Missing server TLS cert/key in connection.server_cert")
@@ -185,10 +187,14 @@ class Agent(BootAgent):
             self.expected_peer_spki = client_cert.get("spki_pin")
 
             # Optionally load remote_pubkey for packet signature auth
-            signing_cfg = security.get("signing", {})
-            peer_pub_pem = signing_cfg.get("remote_pubkey")
-            self.peer_pub_key = RSA.import_key(peer_pub_pem.encode()) if peer_pub_pem else None
+            self._signing_keys = security.get("signing", {})
+            self._has_signing_keys = bool(self._signing_keys.get('privkey')) and bool(self._signing_keys.get('remote_pubkey'))
 
+            if self._has_signing_keys:
+                priv_pem = self._signing_keys.get("privkey")
+                priv_pem = pem_fix(priv_pem)
+                self._signing_key_obj = RSA.import_key(priv_pem.encode() if isinstance(priv_pem, str) else priv_pem)
+                self._peer_pub_key = RSA.import_key(self._signing_keys.get("remote_pubkey").encode())
 
             self.log(f"[SERVER-CERT-DEBUG] uid={self.command_line_args['universal_id']} "
                   f"cert_len={len(cert_pem or '')} "
@@ -205,7 +211,6 @@ class Agent(BootAgent):
         except Exception as e:
             self.log("[CERT-LOADER][FATAL] Failed to load certs from directive", error=e, block="init")
             time.sleep(2)
-            self.run_server_retries = False
 
         self.local_tree_root = None
         # keep trying to start for infinity: false do max retries in method
@@ -380,14 +385,15 @@ class Agent(BootAgent):
                     return jsonify({"status": "denied", "message": "bad timestamp"}), 403
 
                 # 5) Signature verification over inner dict
-                if not (self.peer_pub_key and sig_b64 and inner):
+                if not (self._peer_pub_key and sig_b64 and inner):
                     return jsonify({"status": "denied", "message": "missing signature or key"}), 403
 
                 try:
-                    crypto_utils.verify_signed_payload(inner, sig_b64, self.peer_pub_key)
+                    crypto_utils.verify_signed_payload(inner, sig_b64, self._peer_pub_key)
                 except Exception as e:
                     self.log(f"[HTTPS][SIG DENY] {e}")
                     return jsonify({"status": "denied", "message": "bad signature"}), 403
+
 
                 # 6) All gates passed — relay to Matrix
                 self.log(f"[MATRIX-HTTPS][RELAY] {handler} from {ip}")
@@ -398,9 +404,12 @@ class Agent(BootAgent):
                 self.pass_packet(pk, target_uid="matrix")
                 return jsonify({"status": "ok", "message": "Relayed to Matrix"})
 
+
             except Exception as e:
                 self.log(f"[MATRIX-HTTPS][ERROR]", error=e, block="main_try")
                 return jsonify({"status": "error", "message": str(e)}), 500
+
+
 
         @self.app.route("/matrix", methods=["GET", "PUT", "DELETE", "OPTIONS", "HEAD"])
         def deny_unsupported_methods():
@@ -518,7 +527,7 @@ class Agent(BootAgent):
                 )
 
                 # Limit how long handshakes can sit idle
-                httpd.socket.settimeout(30)  # 5-second handshake window
+                httpd.socket.settimeout(30)  # 30-second handshake window
 
                 self.log(f"[HTTPS] Listening on port {self.port}")
 

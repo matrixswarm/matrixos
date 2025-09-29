@@ -60,12 +60,23 @@ class Agent(BootAgent):
         if not self.token or not self.chat_id:
             self.log("[TELEGRAM][ERROR] Missing bot_token or chat_id.")
             return
+
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         try:
-            requests.post(url, json={"chat_id": self.chat_id, "text": message})
-            self.log("[TELEGRAM] Message relayed.")
+            resp = requests.post(url, json={"chat_id": self.chat_id, "text": message}, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("ok"):
+                    self.log("[TELEGRAM] ✅ Message delivered successfully.")
+                else:
+                    self.log(f"[TELEGRAM][ERROR] API error: {data}")
+            else:
+                body = resp.text.strip()
+                if len(body) > 200:
+                    body = body[:200] + "...[truncated]"
+                self.log(f"[TELEGRAM][ERROR] HTTP {resp.status_code} → {body}")
         except Exception as e:
-            self.log(f"[TELEGRAM][ERROR] Telegram delivery failed: {e}")
+            self.log(f"[TELEGRAM][ERROR] Telegram delivery exception: {e}")
 
 def on_alarm(self, payload):
     msg = f"🚨 [{payload['level'].upper()}] {payload['universal_id']} — {payload['cause']}"
