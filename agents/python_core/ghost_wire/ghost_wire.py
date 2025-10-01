@@ -199,8 +199,9 @@ class Agent(BootAgent, ReflexAlertMixin):
                 self.persist(user, self.sessions[user])  # Still persist session
                 continue
             last_seen_cmd = session.get("last_command_timestamp", 0)
-            if time.time() - last_seen_cmd > 600:
+            if time.time() - last_seen_cmd > 600 and (not session.get("last_prompt_log") or time.time() - session["last_prompt_log"] > 600):
                 self.log(f"[GHOSTWIRE][{user}] 🕒 History inactive >10 min. May need PROMPT_COMMAND='history -a'")
+                session["last_prompt_log"] = time.time()
 
             if os.path.exists(history_path):
                 try:

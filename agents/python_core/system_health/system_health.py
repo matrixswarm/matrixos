@@ -1,8 +1,5 @@
-#Authored by Daniel F MacDonald and Gemini
-import sys
-import os
-import psutil
-
+#Authored by Daniel F MacDonald and ChatGPT aka The Generals
+import sys, os, time, psutil
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 
@@ -12,98 +9,101 @@ from core.python_core.class_lib.packet_delivery.utility.encryption.utility.ident
 
 class Agent(BootAgent):
     """
-    A config-driven MatrixSwarm agent that monitors system resources.
-    It sends reports to the role defined in its configuration.
+    A hardened MatrixSwarm agent that monitors system resources and
+    reports structured metrics to the forensic role.
     """
     def __init__(self):
-        """
-        Initializes the agent and loads its configuration directly from the
-        directive's tree_node, following the swarm's standard pattern.
-        """
         super().__init__()
-        try:
-            self.name = "SystemHealthMonitor"
+        self.name = "SystemHealthMonitor"
 
-            # Get the agent's specific config dictionary from the global tree_node.
-            config = self.tree_node.get("config", {})
+        cfg = self.tree_node.get("config", {})
+        self.mem_threshold = cfg.get("mem_threshold_percent", 95.0)
+        self.cpu_threshold = cfg.get("cpu_threshold_percent", 90.0)
+        self.disk_threshold = cfg.get("disk_threshold_percent", 95.0)
+        self.interval = cfg.get("check_interval_sec", 60)
+        self.report_to_role = cfg.get("report_to_role", "hive.forensics.data_feed")
 
-            self.log("Initializing SystemHealthMonitor from directive config...")
+        self._emit_beacon = self.check_for_thread_poke("worker",
+                                                      timeout=self.interval*2,
+                                                      emit_to_file_interval=10)
 
-            # Set attributes, using config values but keeping original defaults as fallbacks.
-            self.mem_threshold = config.get("mem_threshold_percent", 95.0)
-            self.cpu_threshold = config.get("cpu_threshold_percent", 90.0)
-            self.disk_threshold = config.get("disk_threshold_percent", 95.0)
-            self.interval = config.get("check_interval_sec", 60)
-            self.report_to_role = config.get("report_to_role", "hive.forensics.data_feed")
+        # Cooldown store for each metric to avoid spamming
+        self.last_alerts = {}
 
-
-            self.log(f"Monitoring configured: [Mem: {self.mem_threshold}%, CPU: {self.cpu_threshold}%, Disk: {self.disk_threshold}%]")
-            self.log(f"Reporting to role '{self.report_to_role}'")
-            self._emit_beacon = self.check_for_thread_poke("worker", timeout=self.interval*2, emit_to_file_interval=10)
-        except Exception as e:
-            self.log(error=e, block="main_try", level="ERROR")
+        self.log(f"[SYSTEM-HEALTH] Ready. Mem>{self.mem_threshold} CPU>{self.cpu_threshold} Disk>{self.disk_threshold} Reporting→{self.report_to_role}")
 
     def send_status_report(self, service_name, status, severity, details):
-        """Helper method to construct and send a status packet to the configured role."""
-        try:
-            if not self.report_to_role:
-                self.log(f"alert handler {self.report_to_role} not provided.", level='ERROR')
-                return
+        """Send a structured status event packet with metrics attached."""
+        endpoints = self.get_nodes_by_role(self.report_to_role)
+        if not endpoints:
+            self.log(f"[SYSTEM-HEALTH] No endpoints for role '{self.report_to_role}'", level="WARN")
+            return
 
-            endpoints = self.get_nodes_by_role(self.report_to_role)
-            if not endpoints:
-                self.log(f"No alert-compatible agents found for '{self.report_to_role}'", level='ERROR')
-                return
+        pk_inner = self.get_delivery_packet("standard.status.event.packet")
+        pk_inner.set_data({
+            "source_agent": self.name,
+            "service_name": service_name,
+            "status": status,
+            "details": details,
+            "severity": severity,
+        })
 
-            pk_content = {
-                "handler": self.report_to_role,
-                "content": {"source_agent": self.name,
-                            "service_name": service_name,
-                            "status": status,
-                            "details": details,
-                            "severity": severity}
-            }
+        pk = self.get_delivery_packet("standard.command.packet")
+        pk.set_data({"handler": "cmd_ingest_status_report"})
+        pk.set_packet(pk_inner, "content")
 
+        for ep in endpoints:
+            pk.set_payload_item("handler", ep.get_handler())
+            self.pass_packet(pk, ep.get_universal_id())
+        self.log(f"[SYSTEM-HEALTH] {severity} {service_name} sent to {self.report_to_role}", level="INFO")
 
-            pk = self.get_delivery_packet("standard.command.packet")
-            pk.set_data(pk_content)
-
-            pk.set_packet(pk, "content")
-
-            for ep in endpoints:
-                pk.set_payload_item("handler", ep.get_handler())
-                self.pass_packet(pk, ep.get_universal_id())
-                self.log(f"[SYSTEM-HEALTH] Sent '{severity}' for '{service_name}' → {ep.get_universal_id()} ({self.report_to_role})", level="WARN")
-
-            #if self.debug.is_enabled():
-            #    self.log(f"Sent '{severity}' for '{service_name}' to role '{self.report_to_role}'", level="INFO")
-        except Exception as e:
-            self.log(error=e, block="main_try", level="ERROR")
+    def check_and_report(self, key, condition, service_name, status, severity, details):
+        """Wraps checks with 5-minute cooldown to prevent alert storms."""
+        now = time.time()
+        last = self.last_alerts.get(key, 0)
+        if condition and (now - last > 300):
+            self.send_status_report(service_name, status, severity, details)
+            self.last_alerts[key] = now
 
     def worker(self, config: dict = None, identity: IdentityObject = None):
-        """Main execution loop for the agent."""
+
         try:
             self._emit_beacon()
-            # Check Memory
+
+            # Memory
             mem = psutil.virtual_memory()
-            if mem.percent > self.mem_threshold:
-                self.send_status_report("system.memory", "high_usage", "WARNING",
-                                        f"Memory usage is critical: {mem.percent:.2f}%.")
+            sev = "CRITICAL" if mem.percent > self.mem_threshold + 5 else "WARNING"
+            self.check_and_report("memory",
+                                  mem.percent > self.mem_threshold,
+                                  "system.memory",
+                                  "high_usage",
+                                  sev,
+                                  {"usage_percent": mem.percent, "threshold": self.mem_threshold})
 
-            # Check CPU
-            cpu = psutil.cpu_percent(interval=1)
-            if cpu > self.cpu_threshold:
-                self.send_status_report("system.cpu", "high_load", "WARNING", f"CPU load is critical: {cpu:.2f}%.")
+            # CPU (use load avg for Unix if available)
+            cpu = psutil.cpu_percent(interval=None)
+            sev = "CRITICAL" if cpu > self.cpu_threshold + 5 else "WARNING"
+            self.check_and_report("cpu",
+                                  cpu > self.cpu_threshold,
+                                  "system.cpu",
+                                  "high_load",
+                                  sev,
+                                  {"usage_percent": cpu, "threshold": self.cpu_threshold})
 
-            # Check Disk
-            disk = psutil.disk_usage('/')
-            if disk.percent > self.disk_threshold:
-                self.send_status_report("system.disk", "low_space", "WARNING",
-                                        f"Root disk space is critical: {disk.percent:.2f}% full.")
-
-
+            # Disks – iterate partitions
+            for part in psutil.disk_partitions():
+                usage = psutil.disk_usage(part.mountpoint)
+                sev = "CRITICAL" if usage.percent > self.disk_threshold + 5 else "WARNING"
+                self.check_and_report(f"disk_{part.mountpoint}",
+                                      usage.percent > self.disk_threshold,
+                                      f"system.disk.{part.mountpoint}",
+                                      "low_space",
+                                      sev,
+                                      {"mount": part.mountpoint,
+                                       "usage_percent": usage.percent,
+                                       "threshold": self.disk_threshold})
         except Exception as e:
-            self.log(error=e, block="main_try", level="ERROR")
+            self.log(error=e, level="ERROR", block="main_try")
 
         interruptible_sleep(self, self.interval)
 
