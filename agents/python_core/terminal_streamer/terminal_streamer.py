@@ -185,14 +185,6 @@ class Agent(BootAgent):
         self.active_streams.pop(sess, None)
         self.log(f"[TERMINAL] 🛑 Stopped stream for sess={sess}")
 
-    def _hash_lines(self, lines: list[str]) -> str:
-        """
-        Returns a short SHA256 hash of the given log lines.
-        """
-        blob = "\n".join(lines).encode("utf-8")
-        h = hashlib.sha256(blob).hexdigest()
-        return h[:12]  # shorten for readability
-
     def _run_loop(self, sess, token, cmd, refresh, handler, stop_flag):
         while not stop_flag.is_set():
             try:

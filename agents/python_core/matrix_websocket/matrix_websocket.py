@@ -24,6 +24,7 @@ from core.python_core.utils.crypto_utils import pem_fix
 from core.python_core.utils.cert_loader import load_cert_chain_from_memory
 from core.python_core.utils.swarm_sleep import interruptible_sleep
 from core.python_core.utils import crypto_utils
+from core.python_core.class_lib.packet_delivery.utility.security.packet_size import guard_packet_size
 
 class Agent(BootAgent):
     """
@@ -136,7 +137,7 @@ class Agent(BootAgent):
         prepares the agent for network communication.
         """
         super().__init__()
-        self.AGENT_VERSION = "2.0.0"
+        self.AGENT_VERSION = "2.0.1"
 
         try:
 
@@ -373,17 +374,19 @@ class Agent(BootAgent):
 
     async def _websocket_handler_core(self, websocket):
         """
-        The core, low-level handler for a single WebSocket connection.
+        The core handler for new WebSocket connections.
 
-        This coroutine manages the entire lifecycle of a client connection,
-        from the initial handshake to message reception and session cleanup.
-        It performs critical security checks, including IP allowlisting,
-        and verifies the handshake and subsequent messages with a
-        cryptographic signature check.
+        This method orchestrates the connection lifecycle:
+        1. It performs the initial handshake (`_handle_handshake`), which includes
+           waiting for the 'hello' packet, signature verification, and session binding.
+        2. If the handshake succeeds, it enters the message processing loop
+           (`_handle_message_loop`) to handle all incoming signed packets.
+        3. The `finally` block ensures proper session cleanup, including removing
+           the client from the active set, popping the session from the dictionary,
+           and removing the local broadcast flag.
 
-        Args:
-            websocket (websockets.WebSocketServerProtocol): The active
-                WebSocket connection object.
+        :param websocket: The incoming WebSocket connection object.
+        :type websocket: websockets.WebSocketServerProtocol
         """
         try:
 
@@ -399,7 +402,7 @@ class Agent(BootAgent):
             if not cert_bin:
                 self.log(
                     f"[WS][NO CLIENT CERT] No client certificate presented by IP {ip} — cannot perform SPKI pin check")
-                await websocket.close(reason="No client cert for SPKI verification")
+                await websocket.close(reason="No client cert")
                 return
 
             # Explicitly confirm the client is in allowlist (or no allowlist restriction)
@@ -413,119 +416,166 @@ class Agent(BootAgent):
             else:
                 self.log("[WS][SECURITY] No IP allowlist restriction in place")
 
-            # Confirm explicitly SSL transport details
-            ssl_object = websocket.transport.get_extra_info('ssl_object')
-            if ssl_object:
-                cipher = ssl_object.cipher()
-                peercert = ssl_object.getpeercert()
-                self.log(f"[WS][TLS DETAILS] Cipher={cipher}, PeerCert={peercert}")
-            else:
-                self.log("[WS][HANDSHAKE ERROR] No SSL object found post-handshake")
-                await websocket.close(reason="SSL handshake failed")
+            # ... cert + allowlist checks here ...
+
+            # Phase 1: Handshake
+            sid = await self._handle_handshake(websocket)
+            if not sid:
                 return
 
-            self._websocket_clients.add(websocket)
-
-            self.log("[WS][CLIENT] Explicitly added client successfully. Ready for messages.")
-
-            try:
-                handshake = await asyncio.wait_for(websocket.recv(), timeout=5)
-                hello = json.loads(handshake)
-                if hello.get("type") == "hello" and "session_id" in hello:
-
-                    if "sig" not in hello:
-                        await websocket.close(reason="missing signature")
-                        return
-                    try:
-                        crypto_utils.verify_signed_payload(hello, hello["sig"], self.peer_pub_key)
-                        self.log(f"[WS][HELLO] Signature Accepted")
-                    except Exception as e:
-                        self.log(f"[WS][HELLO][DENY] Bad signature: {e}")
-                        await websocket.close(reason="bad hello signature")
-                        return
-
-                    sid = hello["session_id"]
-                    websocket.session_id = sid
-                    self._sessions[sid] = {
-                        "ws": websocket,
-                        "agent": hello.get("agent"),
-                        "started": time.time()
-                    }
-
-                    async def ping_keepalive(ws, sid):
-                        while sid in self._sessions:
-                            try:
-                                await ws.ping()
-                            except Exception:
-                                break
-                            await asyncio.sleep(10)
-
-                    self.loop.create_task(ping_keepalive(websocket, sid))
-
-                    self.update_broadcast_flag(session_id=sid)
-                    self.log(f"[WS][SESSION] Bound to session_id={sid}")
-                else:
-                    self.log("[WS][SESSION][WARN] Invalid hello packet, closing.")
-                    await websocket.close(reason="missing session_id")
-                    return
-            except Exception as e:
-                self.log(f"[WS][SESSION][ERROR] Handshake failed: {e}")
-                await websocket.close(reason="handshake failed")
-                return
-
-            while True:
-                try:
-                    raw = await websocket.recv()
-                    self.log(f"[WS][MESSAGE RECEIVED] {raw}")
-
-                    outer = json.loads(raw)
-
-                    sig_b64 = outer.get("sig")
-                    inner = outer.get("content", {})
-
-                    try:
-                        crypto_utils.verify_signed_payload(inner, sig_b64, self.peer_pub_key)
-                        data = inner
-                        self.log(f"[WS][HELLO] Signature Accepted")
-                    except Exception as e:
-                        self.log(f"[WS][SIG DENY] {e}")
-                        await websocket.close(reason="bad message signature")
-                        break
-
-                    # Explicit echo acknowledgment
-                    await websocket.send(json.dumps({
-                        "type": "ack",
-                        "echo": data
-                    }))
-
-                except websockets.ConnectionClosed as cc:
-                    self.log(f"[WS][DISCONNECT] Explicit graceful disconnect ({cc.code}): {cc.reason}")
-                    break
-                except json.JSONDecodeError:
-                    self.log("[WS][ERROR] Explicit malformed JSON received.")
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "message": "Malformed JSON"
-                    }))
-                except Exception as e:
-                    self.log(f"[WS][ERROR] Unexpected error explicitly: {e}")
-                    break
+            # Phase 2: Message loop
+            await self._handle_message_loop(websocket, sid)
 
         except Exception as e:
-            self.log(f"[WS][FATAL] Explicit WebSocket handshake exception: {e}")
+            self.log(f"[WS][FATAL] Handshake exception: {e}")
             await websocket.close(reason="Internal WebSocket exception")
 
-
-
         finally:
-
             self._websocket_clients.discard(websocket)
             if hasattr(websocket, "session_id"):
                 sid = websocket.session_id
-                if sid in self._sessions:
-                    self._sessions.pop(sid, None)
-                    self.update_broadcast_flag(session_id=sid, remove=True)
+                self._sessions.pop(sid, None)
+                self.update_broadcast_flag(session_id=sid, remove=True)
             self.log(f"[WS][CLEANUP] Client removed. Active={len(self._websocket_clients)}")
+
+    async def _handle_handshake(self, websocket):
+        """
+        Performs the initial secure 'hello' handshake with the client.
+
+        This critical phase enforces multiple security and session checks:
+        1. Waits for a JSON 'hello' packet, expecting fields like "type" and "session_id".
+        2. Verifies the packet's digital signature using the agent's known
+           `peer_pub_key` to authenticate the client application.
+        3. If successful, it binds the `session_id` to the WebSocket object,
+           updates the `_sessions` dictionary, and starts an asynchronous keep-alive
+           ping task for the client.
+        4. Creates the local broadcast flag file to signal other agents that a
+           GUI session is active.
+
+        :param websocket: The active WebSocket connection.
+        :type websocket: websockets.WebSocketServerProtocol
+        :returns: The valid session ID (str) upon success, or None on failure.
+        :rtype: str or None
+        """
+        try:
+            handshake = await asyncio.wait_for(websocket.recv(), timeout=5)
+            hello = json.loads(handshake)
+
+            if hello.get("type") != "hello" or "session_id" not in hello:
+                self.log("[WS][SESSION][WARN] Invalid hello packet, closing.")
+                await websocket.close(reason="invalid hello")
+                return None
+
+            if "sig" not in hello:
+                await websocket.close(reason="missing signature")
+                return None
+
+            try:
+                crypto_utils.verify_signed_payload(hello, hello["sig"], self.peer_pub_key)
+                self.log(f"[WS][HELLO] Signature Accepted")
+            except Exception as e:
+                self.log(f"[WS][HELLO][DENY] Bad signature: {e}")
+                await websocket.close(reason="bad hello signature")
+                return None
+
+            sid = hello["session_id"]
+            websocket.session_id = sid
+            self._sessions[sid] = {
+                "ws": websocket,
+                "agent": hello.get("agent"),
+                "started": time.time()
+            }
+
+            # Keepalive pinger
+            async def ping_keepalive(ws, sid):
+                while sid in self._sessions:
+                    try:
+                        await ws.ping()
+                    except Exception:
+                        break
+                    await asyncio.sleep(10)
+
+            self.loop.create_task(ping_keepalive(websocket, sid))
+            self.update_broadcast_flag(session_id=sid)
+
+            self.log(f"[WS][SESSION] Bound to session_id={sid}")
+            return sid
+
+        except Exception as e:
+            self.log(f"[WS][SESSION][ERROR] Handshake failed: {e}")
+            await websocket.close(reason="handshake failed")
+            return None
+
+    async def _handle_message_loop(self, websocket, sid):
+        """
+        Processes all incoming signed packets from an authenticated client session.
+
+        This loop continuously waits for messages and applies a series of
+        security and validation guards to every packet:
+        1. **Structure Guard**: Ensures the packet structure is valid JSON.
+        2. **Size Guard**: Prevents oversized payloads using `guard_packet_size`.
+        3. **Timestamp / Replay Guard**: Checks the packet's timestamp (`ts`) to
+           prevent replay attacks (must be within a 120-second window).
+        4. **Signature Guard**: Verifies the digital signature (`sig`) using the
+           `peer_pub_key`.
+        Upon passing all checks, an acknowledgement (`ack`) is sent back to the client.
+
+        :param websocket: The active WebSocket connection.
+        :type websocket: websockets.WebSocketServerProtocol
+        :param sid: The verified session ID of the client.
+        :type sid: str
+        """
+        while True:
+            try:
+                raw = await websocket.recv()
+                self.log(f"[WS][MESSAGE RECEIVED] {raw}")
+                outer = json.loads(raw)
+
+                sig_b64 = outer.get("sig")
+                inner = outer.get("content", {})
+
+                # --- Structure guard ---
+                if not isinstance(inner, dict):
+                    await websocket.send(json.dumps({"type": "error", "message": "bad packet format"}))
+                    continue
+
+                # --- Size guard ---
+                if not guard_packet_size(inner, log=self.log):
+                    await websocket.send(json.dumps({"type": "error", "message": "bad or oversized payload"}))
+                    continue
+
+                # --- Timestamp / Replay guard ---
+                ts = inner.get("ts")
+                try:
+                    if not ts or abs(time.time() - float(ts)) > 120:
+                        await websocket.send(json.dumps({"type": "error", "message": "stale or bad timestamp"}))
+                        continue
+                except Exception:
+                    await websocket.send(json.dumps({"type": "error", "message": "bad timestamp format"}))
+                    continue
+
+                # --- Signature guard ---
+                try:
+                    crypto_utils.verify_signed_payload(inner, sig_b64, self.peer_pub_key)
+                    data = inner
+                    self.log(f"[WS][MSG] Signature Accepted")
+                except Exception as e:
+                    self.log(f"[WS][SIG DENY] {e}")
+                    await websocket.close(reason="bad message signature")
+                    break
+
+                # --- Ack only if all guards pass ---
+                await websocket.send(json.dumps({"type": "ack", "echo": data}))
+
+            except websockets.ConnectionClosed as cc:
+                self.log(f"[WS][DISCONNECT] Graceful disconnect ({cc.code}): {cc.reason}")
+                break
+            except json.JSONDecodeError:
+                self.log("[WS][ERROR] Malformed JSON")
+                await websocket.send(json.dumps({"type": "error", "message": "Malformed JSON"}))
+            except Exception as e:
+                self.log(f"[WS][ERROR] Unexpected: {e}")
+                break
 
     def update_broadcast_flag(self, session_id=None, remove=False):
         """
@@ -670,75 +720,6 @@ class Agent(BootAgent):
         """
         self.log(f"Dispatching alert to GUI: {content}")
         self.cmd_broadcast(content, packet)
-
-    def cmd_hive_log_delivery(self, content, packet, identity=None):
-        """
-        Delivers formatted log content to the GUI.
-
-        This command handler retrieves a log file for a specified agent,
-        parses the JSON log entries, formats them with emojis and timestamps,
-        and then broadcasts the final, readable log to all connected GUI clients.
-        """
-        uid = content.get("universal_id")
-        num_lines = content.get("lines", 500)
-        log_path = os.path.join(self.path_resolution["comm_path"], uid, "logs", "agent.log")
-
-        if not os.path.exists(log_path):
-            self.log(f"[LOG-DELIVERY] ❌ Log file not found: {uid}")
-            return
-
-        try:
-            with open(log_path, "r", encoding="utf-8") as f:
-                raw_lines = f.readlines()[-num_lines:]
-
-            emoji_map = {
-                "INFO": "🔹",
-                "ERROR": "❌",
-                "DEBUG": "🐞",
-                "WARNING": "⚠️"
-            }
-
-            final_lines = []
-            for line in raw_lines:
-                try:
-                    entry = json.loads(line)
-                    lvl = entry.get("level", "INFO")
-                    ts = entry.get("timestamp", "?")
-                    msg = entry.get("message", line.strip())
-                    emoji = emoji_map.get(lvl.upper(), "🔸")
-                    final_lines.append(f"{emoji} [{ts}] [{lvl}] {msg}")
-                except:
-                    final_lines.append(f"[MALFORMED] {line.strip()}")
-
-            payload = {
-                "handler": "phoenix.rpc_result.file_log_display",
-                "content": {
-                    "universal_id": uid,
-                    "log": "\n".join(final_lines)
-                }
-            }
-
-            self.cmd_broadcast(payload, packet)
-            self.log(f"[LOG-DELIVERY] 📤 Broadcast log for {uid} to GUI.")
-
-        except Exception as e:
-            self.log(f"[LOG-DELIVERY][ERROR] Failed to send log: {e}")
-
-
-    def decrypt_log_line(line, key_bytes):
-        """
-        A placeholder for a method to decrypt a single line of an encrypted log.
-
-        This method is a stub and requires a full implementation to handle
-        decryption logic if the logs are encrypted.
-        """
-        try:
-            blob = base64.b64decode(line.strip())
-            nonce, tag, ciphertext = blob[:12], blob[12:28], blob[28:]
-            cipher = AES.new(key_bytes, AES.MODE_GCM, nonce=nonce)
-            return cipher.decrypt_and_verify(ciphertext, tag).decode()
-        except Exception as e:
-            return f"[DECRYPT-FAIL] {str(e)}"
 
     def cmd_broadcast(self, content, packet, identity:IdentityObject = None):
         """
