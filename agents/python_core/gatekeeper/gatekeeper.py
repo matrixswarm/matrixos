@@ -6,6 +6,7 @@ sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 import json
 import time
+import select
 import subprocess
 import ipaddress
 from datetime import datetime
@@ -148,10 +149,10 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(error=e, level="ERROR", block="main_try")
 
-
     def tail_log(self):
         self.log(f"[GATEKEEPER] Tailing: {self.log_path}")
         self._emit_beacon_tail_log()
+
         try:
             with subprocess.Popen(
                     ["tail", "-n", "0", "-F", self.log_path],
@@ -167,25 +168,23 @@ class Agent(BootAgent):
                 last_emit = time.time()
 
                 while True:
-                    line = proc.stdout.readline()
-
-                    # heartbeat even if no new line
+                    rlist, _, _ = select.select([proc.stdout], [], [], 5)
                     now = time.time()
-                    if now - last_emit >= 30:  # configurable
-                        self._emit_beacon_tail_log()
-                        last_emit = now
 
-                    if not line:
-                        # tail ended or rotated, break to restart
-                        if proc.poll() is not None:
-                            self.log("[GATEKEEPER] tail process exited, restarting…")
-                            break
-                        continue
+                    if rlist:
+                        line = proc.stdout.readline()
+                        if line:
+                            self._emit_beacon_tail_log()
+                            last_emit = now
+                            self._process_login_line(line)
+                    else:
+                        if now - last_emit >= 30:
+                            self._emit_beacon_tail_log()
+                            last_emit = now
 
-                    # normal log parsing continues here
-                    self._emit_beacon_tail_log()
-                    last_emit = now
-                    self._process_login_line(line)
+                    if proc.poll() is not None:
+                        self.log("[GATEKEEPER] tail process exited, restarting…")
+                        break
 
         except Exception as e:
             self.log("[GATEKEEPER][ERROR] tail_log exception", error=e)
