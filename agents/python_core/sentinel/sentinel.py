@@ -52,7 +52,8 @@ class Agent(BootAgent):
         self.watching = config.get("watching", "the Matrix")
         self.universal_id_under_watch = config.get("universal_id_under_watch", False)
         self.target_node = None
-        self._emit_beacon = self.check_for_thread_poke("worker", timeout=30, emit_to_file_interval=10)
+        self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
+        self._emit_beacon_watch_cycle = self.check_for_thread_poke("watch_cycle", timeout=60, emit_to_file_interval=10)
 
     def post_boot(self):
         """
@@ -65,6 +66,20 @@ class Agent(BootAgent):
     def worker_pre(self):
         """A lifecycle hook that runs before the main worker loop begins."""
         self.log("[SENTINEL] Sentinel activated. Awaiting signal loss...")
+
+    def worker(self, config=None, identity=None):
+        """
+        Keep Sentinel responsive and allow graceful shutdown.
+        """
+        if self.running:
+            self._emit_beacon()
+            interruptible_sleep(self, 5)  # short, interruptible sleep
+            return
+
+        # Shutdown path
+        self.log("[SENTINEL] Shutdown requested, stopping worker.")
+        interruptible_sleep(self, 0.5)
+
 
     def worker_post(self):
         """A lifecycle hook that runs after the agent's main loops exit."""
@@ -102,7 +117,7 @@ class Agent(BootAgent):
                 while self.running:
 
                     try:
-                        self._emit_beacon()
+                        self._emit_beacon_watch_cycle()
 
                         universal_id = self.security_box.get('node').get("universal_id")
 

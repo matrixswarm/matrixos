@@ -16,8 +16,30 @@ import geoip2.database
 import requests
 import threading
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
-
+"""
+Gatekeeper Agent: Monitors system authentication logs for SSH login events,
+processes them for geolocation, and dispatches structured alerts and reports
+to other agents in the swarm.
+"""
 class Agent(BootAgent):
+    """
+    The Gatekeeper Agent monitors system log files (like /var/log/secure or
+    /var/log/auth.log) for successful SSH login events.
+
+    It extracts key information, resolves the source IP's geolocation using
+    a MaxMind GeoLite2 database, and dispatches an alert packet to agents
+    with the configured 'alert_to_role' and a structured status report
+    to agents with the 'report_to_role'.
+
+    Configuration is primarily driven by the 'config' section of the tree_node:
+    - log_path: Path to the authentication log file.
+    - maxmind_db: Path to the GeoLite2 database file.
+    - geoip_enabled: Flag to enable/disable geolocation (defaults to 1).
+    - always_alert: If true, alerts are sent for every login; otherwise, a
+      cooldown period is enforced (defaults to 1).
+    - alert_to_role: Role of agents to receive general alerts.
+    - report_to_role: Role of agents to receive structured status reports.
+    """
     def __init__(self):
         super().__init__()
         self.name = "Gatekeeper"
@@ -54,7 +76,16 @@ class Agent(BootAgent):
         self.report_role = cfg.get("report_to_role", None)  # Optional
 
     def should_alert(self, key):
+        """
+        Determines if an alert should be sent for a given key (e.g., an IP address),
+        respecting the cooldown period unless 'always_alert' is True.
 
+        Args:
+            key (str): A unique identifier for the event source (e.g., the IP address).
+
+        Returns:
+            bool: True if an alert should be dispatched, False otherwise.
+        """
         if self.always_alert:
             return True
 
@@ -66,6 +97,18 @@ class Agent(BootAgent):
         return False
 
     def resolve_ip(self, ip):
+        """
+        Resolves the geographic location (city, region, country) for a given
+        IP address using the MaxMind GeoLite2 database.
+
+        Args:
+            ip (str): The IP address to look up.
+
+        Returns:
+            dict: A dictionary containing the IP and geolocation details.
+                  Returns None for the location fields if the DB is not found
+                  or on error.
+        """
         if not os.path.exists(self.mmdb_path):
             self.log(f"[GATEKEEPER][GEOIP] DB not found at {self.mmdb_path}")
             return {"ip": ip, "city": None, "region": None, "country": None}
@@ -85,8 +128,17 @@ class Agent(BootAgent):
 
 
     def drop_alert(self, info):
+        """
+        Constructs and dispatches a general notification alert packet and a
+        structured status event report based on the provided login information.
 
+        The general alert is sent to agents with 'self.alert_role'.
+        The structured report is sent via `send_status_report` for forensic ingestion.
 
+        Args:
+            info (dict): A dictionary containing login details including user,
+                         ip, timestamp, auth_method, tty, and geo data.
+        """
         try:
 
             endpoints = self.get_nodes_by_role(self.alert_role)
@@ -150,6 +202,13 @@ class Agent(BootAgent):
             self.log(error=e, level="ERROR", block="main_try")
 
     def tail_log(self):
+        """
+        Continuously tails the configured system authentication log file
+        using `subprocess.Popen` with `tail -F`.
+
+        It reads incoming lines and calls `_process_login_line` to handle
+        potential SSH login events. This method runs in a dedicated thread.
+        """
         self.log(f"[GATEKEEPER] Tailing: {self.log_path}")
         self._emit_beacon_tail_log()
 
@@ -190,6 +249,16 @@ class Agent(BootAgent):
             self.log("[GATEKEEPER][ERROR] tail_log exception", error=e)
 
     def _process_login_line(self, line: str):
+        """
+        Parses a single log line to detect and extract details of successful
+        SSH logins (and optionally failed logins if configured).
+
+        On detection, it performs IP resolution, calls `drop_alert`, and
+        persists the data to a local log file.
+
+        Args:
+            line (str): A single line read from the authentication log.
+        """
         line = line.strip()
         if not line:
             return
@@ -259,6 +328,13 @@ class Agent(BootAgent):
             self.log(f"[GATEKEEPER][PARSER][ERROR] Failed to parse login line: {e}")
 
     def persist(self, data):
+        """
+        Writes the processed event data as a JSON object to a daily-rotated log file
+        within the agent's static communication path.
+
+        Args:
+            data (dict): The login event data to be logged.
+        """
         fname = f"ssh_{self.today()}.log"
         path = os.path.join(self.log_dir, fname)
         with open(path, "a", encoding="utf-8") as f:
@@ -266,7 +342,15 @@ class Agent(BootAgent):
 
 
     def send_status_report(self, status, severity, details, metrics=None):
-        #Send a structured status event packet to the configured role for forensic ingestion.
+        """
+        Sends a structured status event packet to the configured role for forensic ingestion.
+
+        Args:
+            status (str): A brief, machine-readable status string (e.g., 'ssh_login_success').
+            severity (str): The severity level (e.g., 'CRITICAL').
+            details (dict): Event-specific details (user, IP, location, etc.).
+            metrics (dict, optional): Associated metric data, like geo details.
+        """
         try:
             if not self.report_role:
                 self.log("[GATEKEEPER] No report_to_role configured, skipping status report.", level='WARN')
@@ -301,10 +385,20 @@ class Agent(BootAgent):
             self.log(f"[GATEKEEPER][ERROR] send_status_report failed: {e}", level='ERROR')
 
     def today(self):
+        """
+        Returns the current date formatted as YYYY-MM-DD.
+        """
         return datetime.now().strftime("%Y-%m-%d")
 
     def worker(self, config: dict = None, identity: IdentityObject = None):
+        """
+        The main loop for the agent. It ensures the `tail_log` thread is running
+        and then sleeps for the configured interval.
 
+        Args:
+            config (dict, optional): Configuration passed to the worker.
+            identity (IdentityObject, optional): The agent's identity.
+        """
         self._emit_beacon()
 
         if not self.tail_thread or not self.tail_thread.is_alive():
