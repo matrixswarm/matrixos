@@ -1,5 +1,4 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
-#Gemini, docstring-ing and added code enhancements.
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import sys
 import os
 sys.path.insert(0, os.getenv("SITE_ROOT"))

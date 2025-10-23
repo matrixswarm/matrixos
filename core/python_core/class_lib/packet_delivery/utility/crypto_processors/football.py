@@ -1,5 +1,3 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
-#Gemini, doc-rocking the Swarm to perfection.
 import json
 import base64
 import os
@@ -366,6 +364,7 @@ class Football(LogMixin):
                 full_path=os.path.join(identity_base_path, universal_id, codex,"signed_public_key.json")
                 with open(full_path, "r", encoding="utf-8") as f:
                     vault = json.load(f)
+                    f.close()
 
             self.add_identity(vault,
                               identity_name=identity_name,

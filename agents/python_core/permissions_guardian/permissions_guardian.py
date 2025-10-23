@@ -1,4 +1,3 @@
-# permissions_guardian.py
 # Authored by Daniel F MacDonald and Gemini
 # Refactored to include persistent, encrypted history and refined cron signals.
 # ChatGPT added code enhancements.

@@ -1,6 +1,4 @@
-# 🧹 SweepCommanderAgent — Autonomous Execution Unit
-# Description: Sends prompts to OracleAgent, receives .cmd replies, and executes validated actions
-
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import sys
 import os
 sys.path.insert(0, os.getenv("SITE_ROOT"))

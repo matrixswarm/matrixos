@@ -1,5 +1,4 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
-#Gemini, docstring-ing and added code enhancements.
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import sys
 import os
 import time
@@ -237,6 +236,15 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(f"[DISCORD][ERROR] Controlled delivery failed: {e}")
 
+    async def count_messages(self, days=1):
+        cutoff = time.time() - (days * 86400)
+        channel = self.bot.get_channel(self.channel_id)
+        count = 0
+        async for msg in channel.history(limit=None):
+            if msg.created_at.timestamp() > cutoff:
+                count += 1
+        return count
+
     async def _async_shutdown_bot(self):
         # coroutine to close bot (call from main thread via run_coroutine_threadsafe)
         if self.bot:
@@ -298,6 +306,51 @@ class Agent(BootAgent):
 
         # final short sleep to allow wrapper to exit
         interruptible_sleep(self, 0.5)
+
+def cmd_cleanup_messages(self, content, packet=None, identity=None):
+    """
+    Phoenix-triggered cleanup command.
+    Deletes past messages sent by the bot in the configured channel.
+
+    Optional fields in content:
+    - tag: filter messages that start with this tag (e.g., "SWARM_PAYLOAD")
+    - ttl_only: if True, only delete messages with expired TTL (meta.timestamp + meta.ttl)
+    """
+    tag = content.get("tag")
+    ttl_only = content.get("ttl_only", False)
+
+    async def _clean():
+        channel = self.bot.get_channel(self.channel_id)
+        if not channel:
+            self.log("[DISCORD][ERROR] Channel not found for cleanup.")
+            return
+
+        deleted = 0
+        async for msg in channel.history(limit=100):
+            if msg.author != self.bot.user:
+                continue
+
+            if tag and not msg.content.startswith(tag):
+                continue
+
+            try:
+                if ttl_only:
+                    # Try to extract TTL info
+                    payload_block = msg.content.split("```json")[1].split("```")[0]
+                    payload = json.loads(payload_block)
+                    ts = payload.get("meta", {}).get("timestamp")
+                    ttl = payload.get("meta", {}).get("ttl")
+                    if ts and ttl and (time.time() < ts + ttl):
+                        continue  # Not expired
+                await msg.delete()
+                deleted += 1
+            except Exception as e:
+                self.log(f"[DISCORD][WARN] Could not delete msg: {e}")
+
+        self.log(f"[DISCORD] Cleanup complete. {deleted} messages deleted.")
+
+    asyncio.run_coroutine_threadsafe(_clean(), self.bot.loop)
+
 
 if __name__ == "__main__":
     agent = Agent()

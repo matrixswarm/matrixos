@@ -1,4 +1,5 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
+# Gemini, code enhancements and Docstrings
 # ╔════════════════════════════════════════════════════════╗
 # ║               🧹 SCAVENGER AGENT 🧹                    ║
 # ║   Runtime Sweeper · Pod Watchdog · Tombstone Handler   ║
@@ -17,10 +18,8 @@ import json
 import shutil
 import threading
 import psutil
-from pathlib import Path
 
 from core.python_core.boot_agent import BootAgent
-from core.python_core.class_lib.file_system.util.json_safe_write import JsonSafeWrite
 from core.python_core.utils.swarm_sleep import interruptible_sleep
 
 class Agent(BootAgent):
@@ -53,7 +52,7 @@ class Agent(BootAgent):
 
                 if not os.path.exists(pod_root) or not os.path.exists(comm_root):
                     self.log("[SCAVENGER][WARNING] Pod or Comm path missing. Skipping sweep.")
-                    interruptible_sleep(self, 120)
+                    interruptible_sleep(self, 40)
                     continue
 
                 #Loop through the pod looking for boot.json to extract --job [identity train]
@@ -97,7 +96,7 @@ class Agent(BootAgent):
                                 age = now - os.path.getmtime(tomb)
                                 self.log(f"[DEBUG] ⏱️ Tombstone '{tomb}' age: {age:.2f}s")
                                 tombstone_found = True
-                                if age >= 300:  # Change to 0 to force
+                                if age >= 60:  # Change to 0 to force
                                     tombstone_age_ok = True
                                     break
 
@@ -125,10 +124,18 @@ class Agent(BootAgent):
                             continue
 
                         self.log(f"[SCAVENGER] Sweeping corpse: {universal_id} (UUID {uuid})")
-                        if os.path.exists(pod_path):
-                            shutil.rmtree(pod_path)
-                        if os.path.exists(comm_path):
-                            shutil.rmtree(comm_path)
+                        try:
+                            if os.path.exists(pod_path):
+                                shutil.rmtree(pod_path)
+                                self.log(f"[SCAVENGER] ✅ Deleted comm path: {pod_path}")
+                        except Exception as e:
+                            self.log(f"[SCAVENGER][ERROR] Failed to delete comm path: {pod_path} — {e}")
+                        try:
+                            if os.path.exists(comm_path):
+                                shutil.rmtree(comm_path)
+                                self.log(f"[SCAVENGER] ✅ Deleted comm path: {comm_path}")
+                        except Exception as e:
+                            self.log(f"[SCAVENGER][ERROR] Failed to delete comm path: {comm_path} — {e}")
 
                         self.send_confirmation(universal_id, status="terminated")
 

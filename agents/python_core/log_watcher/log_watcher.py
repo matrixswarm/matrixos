@@ -1,4 +1,3 @@
-# log_watcher.py
 # Authored by Daniel F MacDonald and Gemini
 import os
 import sys

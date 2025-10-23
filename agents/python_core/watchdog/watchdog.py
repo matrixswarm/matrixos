@@ -1,4 +1,4 @@
-#Authored by Daniel F MacDonald
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 # ╔════════════════════════════════════════════════════════╗
 # ║                   🧠 WATCHDOG AGENT 🧠                ║
 # ║   Central Cortex · Tree Dispatcher · Prime Director    ║

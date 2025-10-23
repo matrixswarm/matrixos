@@ -1,3 +1,4 @@
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import sys, os, random, time, threading
 
 sys.path.insert(0, os.getenv("SITE_ROOT"))

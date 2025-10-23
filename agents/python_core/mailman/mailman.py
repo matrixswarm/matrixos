@@ -1,3 +1,4 @@
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 # ╔════════════════════════════════════════════════════════╗
 # ║                📬 MAILMAN AGENT                        ║
 # ║  System Logger · Tally Tracker · Message Forwarder     ║

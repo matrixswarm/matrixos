@@ -1,4 +1,3 @@
-# 📡 TelegramRelayAgent — Forwards Swarm Logs to Telegram
 # Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import sys
 import os

@@ -1,4 +1,4 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import sys
 import os
 import psutil

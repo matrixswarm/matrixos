@@ -1,4 +1,3 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import os
 import subprocess
 

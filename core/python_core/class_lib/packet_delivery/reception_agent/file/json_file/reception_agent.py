@@ -130,6 +130,7 @@ class ReceptionAgent(BaseReceptionAgent, LogMixin):
 
                     with open(full_path, "r", encoding="utf-8") as f:
                         raw_data = json.load(f)
+                        f.close()
 
                     try:
                         # decrypt and set packet

@@ -1,8 +1,5 @@
 # Authored by Daniel F MacDonald and ChatGPT aka The Generals
-# Purpose: Responds to `.prompt` files dropped into its payload folder
-# Returns OpenAI-generated responses into `outbox/`
-# Docstrings by Gemini
-
+# Gemini, code enhancements and Docstrings
 import sys
 import os
 sys.path.insert(0, os.getenv("SITE_ROOT"))
@@ -33,7 +30,7 @@ class Agent(BootAgent):
         super().__init__()
 
         try:
-            self.AGENT_VERSION = "1.0.2"
+            self.AGENT_VERSION = "1.0.9"
 
             config = self.tree_node.get("config", {})
             self.api_key = config.get("api_key")

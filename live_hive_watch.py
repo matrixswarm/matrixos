@@ -85,4 +85,12 @@ def live_hive_watch(base="/matrix/universes/runtime", universe="phoenix", interv
     observer.join()
 
 if __name__ == "__main__":
-    live_hive_watch()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Live Hive Watcher")
+    parser.add_argument("--universe", default="phoenix", help="Which universe to watch")
+    parser.add_argument("--interval", type=int, default=5, help="Refresh interval in seconds")
+
+    args = parser.parse_args()
+
+    live_hive_watch(universe=args.universe, interval_sec=args.interval)

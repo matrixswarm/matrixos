@@ -1,4 +1,4 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import sys, os, time, psutil
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))

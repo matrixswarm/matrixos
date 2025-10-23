@@ -1,5 +1,5 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
-# Docstrings by Gemini
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
+# Gemini, code enhancements and Docstrings
 import os
 import time
 import traceback
@@ -18,7 +18,6 @@ from core.python_core.mixin.ghost_rider_ultra import GhostRiderUltraMixin
 from core.python_core.class_lib.time_utils.heartbeat_checker import check_heartbeats
 from core.python_core.core_spawner import CoreSpawner
 from core.python_core.mixin.identity_registry import IdentityRegistryMixin
-from string import Template
 from core.python_core.class_lib.file_system.find_files_with_glob import  FileFinderGlob
 from core.python_core.class_lib.processes.duplicate_job_check import  DuplicateProcessCheck
 from core.python_core.class_lib.logging.logger import Logger
@@ -450,6 +449,15 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
         finally:
             self.log("[ENFORCE] loop exited, DONE")
 
+        self.shutdown_now("die.cookie")
+
+    def shutdown_now(self, reason="normal"):
+        self.log(f"[SHUTDOWN] agent terminating ({reason})")
+        try:
+            time.sleep(0.5)
+        finally:
+            os._exit(0)
+
     def monitor_threads(self):
         while self.running:
             # Only monitor if worker_thread exists
@@ -514,7 +522,14 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
             #clear you're own punji file
             punji_file = os.path.join(self.path_resolution['comm_path'], self.command_line_args['universal_id'], 'incoming', 'punji')
-            os.remove(punji_file)
+            try:
+                if os.path.exists(punji_file):
+                    os.remove(punji_file)
+                    self.log(f"[BOOT] Cleared punji: {punji_file}")
+                else:
+                    self.log(f"[BOOT] No punji file to remove at: {punji_file}")
+            except Exception as e:
+                self.log(f"[BOOT] Failed to remove punji: {punji_file}", error=e)
 
         except Exception as e:
             self.log(error=e, block="main-try")
@@ -639,11 +654,6 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                             handler_name = pk.get("handler")
                             content = pk.get("content", {})
 
-
-                            #will implement on next iteration
-                            #if not self.incoming_packet_acl_check(pk, identity):
-                            #    continue
-
                             # 1. Check if the class has a direct method with this name
                             handler_fn = getattr(self, handler_name, None)
                             #factory handler check
@@ -660,25 +670,6 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                                     continue
                                 except Exception as e:
                                     self.log(f"[UNIFIED][ERROR] Handler '{handler_name}' failed: {e}")
-
-                            # 2. Fallback: Try to dynamically load a factory module
-                            self.log(f"No direct handler '{handler_name}', attempting factory load...")
-
-                            #dynamic module loader
-                            try:
-                                # Clean up handler name (e.g. strip namespaces)
-                                handler_id = handler_name.split(".")[-1]  # e.g. cmd_example
-                                full_module_path = f"agent.{self.command_line_args['agent_name']}.factory.{handler_id}"
-
-                                self.log(f"Attempting: {full_module_path}")
-
-                                mod = __import__(full_module_path, fromlist=["attach"])
-                                mod.attach(self, {"packet": pk, "content": content, "identity": identity})
-
-                                self.log(f"✅ Loaded and attached: {full_module_path}")
-
-                            except Exception as fallback_error:
-                                self.log( f"Could not dynamically load handler '{handler_name}': {fallback_error}", error=fallback_error, block="dynamic_config_packet")
 
                         except Exception as e:
                             self.log(f"Failed to process {fname}", error=e)
@@ -699,14 +690,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             except Exception as e:
                 self.log(error=e, block="packet_listener_post")
 
-            interruptible_sleep(self, 3)
-
-    def incoming_packet_acl_check(self, pk:dict, identity:IdentityObject = None) -> bool:
-        """
-        Determines if the given agent identity is allowed to call this handler.
-        Default stub: allows everything. Can be replaced by Matrix runtime.
-        """
-        return True
+            interruptible_sleep(self, 2)
 
     def save_directive(self, path: dict, node_tree :dict, football:Football):
         """
@@ -722,11 +706,8 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
         try:
 
             pk1 = self.get_delivery_packet("standard.tree.packet", new=True)
-
             pk1.set_data(node_tree)
-
             ra = self.get_delivery_agent("file.json_file", new=True, football=football)
-
             ra.set_location({"path": path["path"]}) \
                 .set_identifier(path['name']) \
                 .set_metadata({"atomic": True}) \
@@ -892,9 +873,9 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             except Exception as e:
                 self.log(error=e)
 
+
     #used to verify and map threads to verify consciousness
-    def check_for_thread_poke(self, thread_token="packet_listener",
-                              timeout=None, sleep_for=None, emit_to_file_interval=10):
+    def check_for_thread_poke(self, thread_token="packet_listener", timeout=None, sleep_for=None, emit_to_file_interval=10):
         """
         Returns an emit() function that writes a heartbeat file no more often than
         emit_to_file_interval seconds. File name encodes timeout/sleep info.
@@ -1216,7 +1197,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
                 if not tree:
                     print(f"[SPAWN][ERROR] Could not load tree for {self.command_line_args['universal_id']}")
-                    interruptible_sleep(self, 5)
+                    interruptible_sleep(self, 3)
                     continue
 
                 for child_id in tp.get_first_level_child_ids(self.command_line_args["universal_id"]):
@@ -1224,21 +1205,21 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                     node = tp.nodes.get(child_id)
                     if not node:
                         self.log(f"[SPAWN] Could not find node for {child_id}")
-                        interruptible_sleep(self, 5)
+                        interruptible_sleep(self, 3)
                         continue
 
                     # Skip deleted nodes
-                    if node.get("deleted", False) is True:
+                    if node.get('lifecycle_status',{}).get("locked", False):
                         if self.debug.is_enabled():
                             self.log(f"[SPAWN-BLOCKED] {node.get('universal_id')} is marked deleted.")
-                        interruptible_sleep(self, 5)
+                        interruptible_sleep(self, 3)
                         continue
 
                     # Skip if die token exists
                     die_file = os.path.join(self.path_resolution['comm_path'], node.get("universal_id"), 'incoming', 'die')
                     if os.path.exists(die_file):
                         self.log(f"[SPAWN-BLOCKED] {node.get('universal_id')} has die file.")
-                        interruptible_sleep(self, 5)
+                        interruptible_sleep(self, 3)
                         continue
 
                     #Go time
@@ -1252,7 +1233,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                         #checks the mtime of the file and calculates if the cron_interval_sec has elapsed since the files creation
                         #if it has the time has elapsed it removes the file and spawns the agent
                         #if not, it goes directly to jail; no pass go.
-                        #once the agent carries out it's mission it drops the mission.complete file and the process goes continues forever, and ever, and ever.
+                        #once the agent carries out it's mission it drops the mission.complete file and the process goes, and continues forever, and ever, and ever.
                         is_cron_job_and_time_to_awake=False
                         if node.get("is_cron_job", False):
                             mission_complete_file= os.path.join(self.path_resolution['comm_path'], node.get("universal_id"), 'hello.moto', 'mission.complete')
@@ -1332,7 +1313,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                         if self.debug.is_enabled():
                             self.log(error=e, block="main_try")
 
-                # 2. If the punji file exists that means singleton_enforcement didn't shutdown the agent, it had 20secs(spawn_manager sleep interval * 1) to do so(bottom of this function interruptible_sleep(self, 20))
+                # 2. If the punji file exists that means singleton_enforcement didn't shut down the agent, it had 20secs(spawn_manager sleep interval * 1) to do so(bottom of this function interruptible_sleep(self, 20))
                 elif not os.path.exists(punji_file):
                     try:
                         os.makedirs(punji_dir, exist_ok=True)
@@ -1399,8 +1380,8 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
         try:
 
-            if tree_node.get("deleted", False):
-                self.log(f"[SPAWN-ERROR] Attempted to spawn deleted agent {universal_id}. Blocking.")
+            if tree_node.get('lifecycle_status',{}).get("locked", False):
+                self.log(f"[SPAWN-ERROR] Attempted to spawn locked agent {universal_id}. Blocking.")
                 return
 
             cp = CoreSpawner(
@@ -1432,26 +1413,30 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                 fpath = os.path.join(dir, "signed_public_key.json")
                 with open(fpath, "w", encoding="utf-8") as f:
                     json.dump(identity, f, indent=2)
+                    f.close()
 
             except Exception as e:
                 self.log(error=e, block='write_signed_public_key')
 
-            result = cp.spawn_agent(
-                universe=universe,
-                spawner=spawner,
-                universal_id=universal_id,
-                agent_name=agent_name,
-                spawn_uuid=new_uuid,
-                tree_node=tree_node,
-            )
 
-            if result is None:
-                self.log(f"[MATRIX][KILL] ERROR: Failed to spawn agent {universal_id}.")
-                return
+            try:
+                result = cp.spawn_agent(
+                    universe=universe,
+                    spawner=spawner,
+                    universal_id=universal_id,
+                    agent_name=agent_name,
+                    spawn_uuid=new_uuid,
+                    tree_node=tree_node,
+                )
+
+            except Exception as e:
+                self.log(f"Failed to spawn agent {universal_id}.", error=e, level="CRITICAL",  block="agent_spawn")
+                return None
 
             return result
 
         except Exception as e:
+
             self.log(error=e, block="main_try")
 
     def pass_packet(self, packet:BasePacket, target_uid:str, drop_zone:str="incoming"):
@@ -1490,7 +1475,9 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                 self.log(f"[PASS-PACKET][FAIL] to {target_uid}: {da.get_error_success_msg()}", level="ERROR")
                 return False
             else:
-                self.log(f"Packet passed to {target_uid} successfully.")
+                if self.debug.is_enabled():
+                    self.log(f"Packet passed to {target_uid} successfully.")
+
                 return True
         except Exception as e:
             self.log(f"Failed during pass_packet to {target_uid}", error=e, level="ERROR")
@@ -1532,3 +1519,20 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
         except Exception as e:
             self.log(f"Failed during catch_packet for {filename}", error=e, level="ERROR")
             return None
+
+    def verify_identity(self, identity: IdentityObject, allowed_uids: list[str]) -> bool:
+        """Centralized identity gatekeeper for secure handlers."""
+        if not self.encryption_enabled:
+            return True  # swarm running in plaintext mode
+
+        # reject invalid or missing identity
+        if not isinstance(identity, IdentityObject) or not identity.has_verified_identity():
+            self.log("[AUTH] Unauthorized access attempt: no valid IdentityObject")
+            return False
+
+        sender = identity.get_sender_uid()
+        if sender not in allowed_uids:
+            self.log(f"[AUTH] Unauthorized access attempt from {sender} (allowed: {allowed_uids})")
+            return False
+
+        return True

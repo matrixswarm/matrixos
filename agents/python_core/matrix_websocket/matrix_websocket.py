@@ -1,5 +1,5 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
-# Docstrings by Gemini
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
+# Gemini Docstrings
 import sys
 import os
 sys.path.insert(0, os.getenv("SITE_ROOT"))
@@ -28,7 +28,7 @@ from core.python_core.class_lib.packet_delivery.utility.security.packet_size imp
 class Agent(BootAgent):
     """
     The Matrix WebSocket Agent, a specialized BootAgent for secure,
-    bi-directional communication with front-end applications.
+    bidirectional communication with front-end applications.
 
     This agent extends the core `BootAgent` functionality with a secure
     WebSocket server. It's designed to provide a real-time, authenticated
@@ -74,9 +74,6 @@ class Agent(BootAgent):
         start_socket_loop():
             Initializes and runs the asyncio event loop for the WebSocket server,
             setting up the SSL context and handling server startup.
-
-        cmd_health_report():
-            A command handler for processing health reports.
 
         websocket_handler():
             A wrapper for the main handler to catch top-level exceptions.
@@ -157,9 +154,9 @@ class Agent(BootAgent):
             client_cert = conn.get("client_cert", {})
             ca_root = conn.get("ca_root", {})
 
-            self.cert_pem = pem_fix(server_cert.get("cert")) if server_cert.get("cert") else None
-            self.key_pem = pem_fix(server_cert.get("key")) if server_cert.get("key") else None
-            self.ca_pem = pem_fix(ca_root.get("cert")) if ca_root.get("cert") else None
+            self.cert_pem = pem_fix(server_cert.get("cert"))
+            self.key_pem = pem_fix(server_cert.get("key"))
+            self.ca_pem = pem_fix(ca_root.get("cert"))
 
             # Compute SPKI pin directly from memory
             try:
@@ -277,7 +274,6 @@ class Agent(BootAgent):
             async def launch():
                 self.log("[WS] Preparing SSL context...")
                 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                ssl_context.check_hostname = False
                 ssl_context.verify_mode = ssl.CERT_REQUIRED
 
                 if self.cert_pem and self.key_pem:
@@ -343,16 +339,6 @@ class Agent(BootAgent):
         except Exception as e:
             self.log("[WS][FATAL] WebSocket startup failed", error=e, block="main_try")
             self.running = False
-
-
-    def cmd_health_report(self, content, packet, identity:IdentityObject = None):
-        """
-        A command handler for processing a health report.
-
-        This method is a hook for the packet listener to process and
-        log health reports received from other agents.
-        """
-        self.log(f"[RELAY] Received health report for {content.get('target_universal_id', '?')}")
 
     async def websocket_handler(self, websocket):
         """

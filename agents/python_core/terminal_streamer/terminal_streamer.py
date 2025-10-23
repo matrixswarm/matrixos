@@ -1,5 +1,4 @@
-# Authored by Daniel F MacDonald and ChatGPT-5 aka The Generals
-# Docstrings by Gemini
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import os
 import sys
 import time
@@ -183,6 +182,22 @@ class Agent(BootAgent):
         self.active_streams[sess]["stop"].set()
         self.active_streams.pop(sess, None)
         self.log(f"[TERMINAL] 🛑 Stopped stream for sess={sess}")
+
+    def cmd_get_allowed_commands(self, content, packet, identity=None):
+        """
+        Returns the current list of allowed (whitelisted) commands.
+        """
+        try:
+            sess = content.get("session_id")
+            token = content.get("token")
+            handler = content.get("return_handler", "terminal_panel.update")
+
+            output = "\n".join(self.whitelist)
+
+            self._broadcast_output(sess, token, output, handler)
+            self.log(f"[TERMINAL] Sent allowed commands list for sess={sess}")
+        except Exception as e:
+            self.log("[TERMINAL][ERROR] Failed to send allowed commands", error=e)
 
     def _run_loop(self, sess, token, cmd, refresh, handler, stop_flag):
         while not stop_flag.is_set():

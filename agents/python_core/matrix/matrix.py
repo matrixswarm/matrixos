@@ -1,6 +1,5 @@
 # Authored by Daniel F MacDonald and ChatGPT aka The Generals
-# Gemini, code enhancments and Docstrings
-
+# Gemini, code enhancements and Docstrings
 import sys
 import os
 
@@ -18,8 +17,6 @@ sys.path.insert(0, os.getenv("AGENT_PATH"))
 # ║       Please take as many as your system can support        ║
 # ╚═════════════════════════════════════════════════════════════╝
 
-
-import re
 import time
 from pathlib import Path
 if os.name == "posix":
@@ -35,7 +32,6 @@ import hashlib
 import json
 import base64
 import secrets
-from datetime import datetime
 from Crypto.PublicKey import RSA
 
 # Assuming self.matrix_priv is currently a string with PEM content:
@@ -44,16 +40,15 @@ from core.python_core.tree_parser import TreeParser
 from Crypto.Signature import pkcs1_15
 from Crypto.Hash import SHA256
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
-from core.python_core.agent_factory.reaper.reaper_factory import make_reaper_node
-from core.python_core.agent_factory.scavenger.scavenger_factory import make_scavenger_node
-from core.python_core.utils.crypto_utils import generate_signed_payload, verify_signed_payload, encrypt_with_ephemeral_aes,  sign_data, pem_fix
+from core.python_core.class_lib.packet_delivery.utility.security.unwrap_secure_packet import unwrap_secure_packet
+from core.python_core.mixin.reap_status_handler import ReapStatusHandlerMixin
+from core.python_core.class_lib.gui.callback_dispatcher import PhoenixCallbackDispatcher, CallbackCtx
+from core.python_core.utils.crypto_utils import encrypt_with_ephemeral_aes,  sign_data, pem_fix
 from core.python_core.class_lib.directive.boot_directive_info import BootDirectiveInfo
-from core.python_core.class_lib.packet_delivery.utility.security.packet_size import guard_packet_size
-from core.python_core.class_lib.packet_delivery.utility.encryption.verify_packet_signature import verify_packet_signature
 from core.python_core.class_lib.time_utils.heartbeat_checker import check_heartbeats
 from core.python_core.utils.analyze_spawn_records import analyze_spawn_records
 from core.python_core.utils.swarm_sleep import interruptible_sleep
-class Agent(BootAgent):
+class Agent(BootAgent, ReapStatusHandlerMixin):
     """The root agent and central authority of the MatrixSwarm.
     As the first agent spawned by the bootloader, the Matrix agent acts as
     the "queen" of the hive. It is responsible for establishing the swarm's
@@ -71,11 +66,13 @@ class Agent(BootAgent):
 
 
         try:
-            self.AGENT_VERSION = "1.3.0"
+            self.AGENT_VERSION = "2.0.0"
             self._agent_tree_master = None
 
             self.boot_directive_info = BootDirectiveInfo(self.security_box)
 
+            self.meta = {}
+            self._last_assassin_run = 0
 
             try:
                 #{"boot_directives_path": config["boot_directives"], "boot_directive_filename": directive_file, "boot_directive_encrypted":is_directive_encrypted, "boot_directive_swarm_key": boot_directive_swarm_key}
@@ -89,9 +86,6 @@ class Agent(BootAgent):
                 #self.log(f"real swarm_key: {self.swarm_key}")
             except Exception as e:
                 self.log("boot directive path and or filename not defined", error=e)
-
-
-
 
             #no need to delegate any agents at start
             self._last_tree_verify = time.time()
@@ -108,12 +102,9 @@ class Agent(BootAgent):
                  "name": "agent_tree_master.json"
             }
 
-            self._acl = {}
-
             # make sure signing keys are loaded BEFORE seeding
             self._signing_keys = self.tree_node.get('config', {}).get('security', {}).get('signing', {})
-            self._has_signing_keys = bool(self._signing_keys.get('privkey')) and bool(
-            self._signing_keys.get('remote_pubkey'))
+            self._has_signing_keys = self._signing_keys.get('privkey', False) and self._signing_keys.get('remote_pubkey', False)
 
             if self._has_signing_keys:
                 priv_pem = self._signing_keys.get("privkey")
@@ -122,13 +113,9 @@ class Agent(BootAgent):
 
             self._serial_num= self.tree_node.get('serial', {})
 
-            self._seed_acl()  # builds dict-shaped ACL entries for matrix + dominion
-
             # delegate Matrix her Tree
             self.delegate_tree_to_agent("matrix", self.tree_path_dict)
 
-            self._signing_keys = self.tree_node.get('config',{}).get('security',{}).get('signing',{})
-            self._has_signing_keys = self._signing_keys.get('privkey',False) and self._signing_keys.get('remote_pubkey',False)
 
             # Inject payload_path if it's not already present
             if "payload_path" not in self.path_resolution:
@@ -142,90 +129,6 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(error=e, level="ERROR")
 
-
-
-    PRIVILEGED_MATRIX_HANDLERS = {
-        "cmd_deliver_agent_tree_to_child",
-    }
-
-    def _keyhash(self, pem_str: str) -> str:
-        return hashlib.sha256(pem_str.encode()).hexdigest()
-
-    def _acl_entry(self, pub_pem: str, allow):
-        # store canonical ACL entries with pubkey so we can verify later
-        return {"pubkey": pub_pem, "allow": set(allow)}
-
-    def _seed_acl(self):
-        try:
-            self._acl = {}
-            # Tier 1: Matrix baseline
-            self._acl[self._keyhash(self.matrix_pub)] = self._acl_entry(self.matrix_pub, self.PRIVILEGED_MATRIX_HANDLERS)
-            # Tier 0: Dominion key (GUI directive signing key) — allow everything
-            dom_pub = self._signing_keys.get('remote_pubkey') if hasattr(self, "_signing_keys") else None
-            if dom_pub:
-                self._acl[self._keyhash(dom_pub)] = self._acl_entry(dom_pub, {"*"})
-        except Exception as e:
-            self.log("ACL seed failed", error=e, block="acl-seed")
-
-    def grant_acl(self, pub_pem: str, handlers):
-        h = self._keyhash(pub_pem)
-        if h in self._acl:
-            if "*" in self._acl[h]["allow"]:
-                return  # already omnipotent
-            self._acl[h]["allow"].update(handlers)
-        else:
-            self._acl[h] = self._acl_entry(pub_pem, handlers)
-
-    def incoming_packet_acl_check(self, pk: dict, identity=None) -> bool:
-        """
-        Access model:
-          • Beast mode (neo cert): signature verifies with self._signing_keys["remote_pubkey"] ⇒ allow any cmd_*
-          • No/invalid signature: goodwill only ⇒ allow cmd_deliver_agent_tree_to_child
-        """
-        try:
-            # 0) Hard size/nesting limits
-            if not guard_packet_size(pk, log=self.log):
-                self.log("[ACL] Size/nesting guard rejected packet")
-                return False
-
-            handler = pk.get("handler")
-            timestamp = pk.get("timestamp")
-            sig = pk.get("sig")
-
-            # Basic shape
-            if not isinstance(handler, str) or timestamp is None:
-                self.log("[ACL] Missing/invalid handler or timestamp")
-                return False
-
-            # 1) Must have a verified identity object
-            if not identity or not getattr(identity, "has_verified_identity", lambda: False)():
-                self.log("[ACL] Identity not verified — dropping")
-                return False
-
-            # 2) Beast mode: signed by dominion key ⇒ allow any cmd_*
-            if sig and self._has_signing_keys and self._signing_keys.get("remote_pubkey"):
-                try:
-                    # raises ValueError on failure
-                    verify_packet_signature(pk, self._signing_keys["remote_pubkey"])
-                    if not handler.startswith("cmd_"):
-                        self.log(f"[ACL] Signed packet but non-command handler blocked: {handler}")
-                        return False
-                    return True
-                except Exception as e:
-                    if self.debug.is_enabled():
-                        self.log("[ACL] Signature present but verification failed; falling back to goodwill", error=e)
-
-            # 3) Goodwill token only: permit the Christmas tree delivery, nothing else
-            if handler == "cmd_deliver_agent_tree_to_child":
-                return True
-
-            self.log(f"[ACL] DENY (goodwill mode) handler={handler}")
-            return False
-
-        except Exception as e:
-            self.log("[ACL] Pipeline error", error=e)
-            return False
-
     def worker(self, config=None, identity=None):
         """
         Keep Matrix responsive and allow graceful shutdown.
@@ -238,7 +141,7 @@ class Agent(BootAgent):
 
         # Shutdown path
         self.log("[MATRIX] Shutdown requested, stopping worker.")
-        interruptible_sleep(self, 0.5)
+        interruptible_sleep(self, 5)
 
     def pre_boot(self):
         message = "Knock... Knock... Knock... The Matrix has you..."
@@ -260,8 +163,26 @@ class Agent(BootAgent):
 
     #called at the end of every packet_listener cycle
     def packet_listener_post(self):
-        self.perform_agent_consciousness_scan()
-        self.perform_tree_master_validation()
+        try:
+            self._perform_agent_consciousness_scan()
+        except Exception as e:
+            self.log(error=e, level="ERROR")
+        try:
+            self.perform_tree_master_validation()
+        except Exception as e:
+            self.log(error=e, level="ERROR")
+        try:
+            # _reaper_transaction_watcher is implemented in the ReapStatusHandlerMixin
+            # This call is rate-limited internally — safe to call every packet tick.
+            self._reaper_transaction_watcher()
+        except Exception as e:
+            self.log(error=e, level="ERROR", block="reaper_watcher")
+        try:
+            self._assassin_manager()
+        except Exception as e:
+            self.log(error=e, level="ERROR")
+
+
 
     def canonize_gospel(self):
         gospel = {
@@ -294,521 +215,396 @@ class Agent(BootAgent):
             output_path=os.path.join(self.path_resolution['comm_path_resolved'], "codex" ,"gospel_of_matrix.sig.json")
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(gospel, f, indent=2)
-
+                f.close()
             print("[GOSPEL] 📜 Gospel of Matrix signed and written to codex.")
 
         except Exception as e:
             self.log(error=e, block="main_try")
 
-    def cmd_delete_agent(self, content, packet, identity:IdentityObject = None):
-        """Handles the command to delete an agent and its entire subtree.
+    def cmd_the_source(self, content, packet, identity:IdentityObject=None):
 
-        This is an orchestrator method. It doesn't delete the agent directly,
-        but instead:
-        1. Marks the target agent and all its children as "deleted" in the tree.
-        2. Saves the updated master agent tree.
-        3. Injects a permanent `reaper` agent to terminate the processes.
-        4. Injects a permanent `scavenger` agent to clean up the directories.
-        5. Optionally sends a response packet back to the caller via an RPC route.
+        """
+        Gate-kept entry-point for **every** command bound for the Matrix core, except for cmd_deliver_agent_tree_to_child used for agents to retreive their agent_trees.
+
+        Incoming packets arrive as an *outer* wrapper that contains an RSA-signed,
+        AES-encrypted payload.
+        `cmd_the_source` verifies the outer signature, decrypts the inner blob,
+        and then dispatches the unwrapped command to the matching private
+        `_cmd_*` handler.
 
         Args:
-            content (dict): The command payload, containing the
-                'target_universal_id' of the agent to delete.
-            packet (dict): The raw packet data.
-            identity (IdentityObject): The verified identity of the command sender.
+            content: The **outer** packet’s `"content"` field. Expected to look like::
+
+                {
+                    "timestamp" : <int>,            # epoch seconds (outer wrapper)
+                    "nonce"     : "<hex-id>",       # swarm-wide tracking nonce
+                    "handler"   : "cmd_the_source", # always this value
+                    "sig"       : "<rsa-sig>",      # RSA signature of the *inner* blob
+                    "content"   : { ... }           # encrypted + signed payload
+                }
+
+            packet: The full transport envelope delivered by the bus
+                (includes routing metadata the GUI / transport layer may add).
+
+            identity: The caller’s verified `IdentityObject` (if the caller
+                authenticated at the transport layer). Currently unused but
+                passed through for parity with other command handlers.
+
+        Workflow:
+            1. `unwrap_secure_packet()`
+               • Verifies RSA signature using `self._signing_keys["remote_pubkey"]`.
+               • Rejects timestamp replays / expired packets.
+               • Decrypts the AES payload with `self._signing_keys["privkey"]`.
+
+            2. Extracts `"handler"` from the unwrapped inner dict.
+               Builds an internal method name `_cmd_<handler>` and looks it up
+               via `getattr`.
+
+            3. If the handler exists and is callable, delegates execution:
+
+               ```python
+               handler(unwrapped.get("content", {}), packet, identity)
+               ```
+
+            4. Any failure at any stage is logged and **silently blocks**
+               the packet (no exception propagated beyond this method).
+
+        Side Effects:
+            • Emits log lines at the INFO/ERROR level for audit-tracing.
+            • May spawn further packets or mutate swarm state indirectly
+              through the delegated handler.
+
+        Returns:
+            None. All meaningful work happens via side effects.
+
+        Security:
+            • Refuses packets that fail signature, decryption, or replay checks.
+            • Only internal `_cmd_*` handlers are ever called; external names are never executed.
+
+        Raises:
+            Does **not** raise; all exceptions are caught, logged, and swallowed
+            to avoid breaking the packet-listener loop.
         """
         try:
 
-            #is a response expected
+            unwrapped = unwrap_secure_packet(content, self._signing_keys["remote_pubkey"], self._signing_keys.get("privkey"), logger=self.log)
+            if not unwrapped:
+                self.log(f"[GATE] ❌ Secure unwrap failed or invalid structure. {packet}")
+                return
+
+            self.log(f"[GATE] Signature accepted.")
+
+            # Gatekeeper: only allow commands from inside
+            inner_handler = unwrapped.get("handler")
+            if not inner_handler:
+                self.log("[GATE] ❌ No handler in unwrapped packet.")
+                return
+
+            # Look for _cmd_* version and call it
+            method_name = f"_cmd_{inner_handler.replace('cmd_', '')}"
+            handler = getattr(self, method_name, None)
+
+            if not callable(handler):
+                self.log(f"[GATE] ❌ No internal handler found for: {method_name}")
+                return
+
+            try:
+                handler(unwrapped.get("content", {}), packet, identity)
+            except Exception as e:
+                self.log(f"[GATE] ❌ Exception calling handler {method_name}", error=e)
+
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+    def _cmd_delete_agent(self, content, packet, identity: IdentityObject = None):
+        """Initiates deletion of a target agent and its subtree.
+        Marks all nodes for deletion and sets up lifecycle callback metadata.
+        The Reaper agent will perform physical cleanup asynchronously.
+        """
+        try:
+            target_id = content.get("target_universal_id")
+            if not target_id:
+                self.log("[DELETE][ERROR] Missing target_universal_id.")
+                return
+
+            if target_id == self.command_line_args.get('universal_id'):
+                self.log("[DELETE][ERROR] Can't delete Matrix.")
+                return
+
+            reaper_id = self.meta.get("swarm_state", {}).get("reserved_agent_ids", {}).get("reaper",False)
+            if reaper_id and target_id == reaper_id:
+                self.log("[DELETE][ERROR] Don't fear The Reaper.")
+                return
+
             confirm_response = bool(content.get("confirm_response", 0))
-            #this is the client rpc handler which handles the response
-            return_handler = content.get("return_handler")
+            response_handler = content.get("return_handler")
             token = content.get("token", 0)
             session_id = content.get("session_id")
 
-            result = self._cmd_delete_agent(content, packet)
+            tp = self.get_agent_tree_master()
+            if not tp:
+                self.log("[DELETE][ERROR] Failed to load agent tree master.")
+                return
 
-            #RPC-DELETE
-            if (confirm_response and
-                return_handler):
+            if not tp.has_node(target_id):
+                self.log(f"[DELETE][WARN] Target agent '{target_id}' not found.")
+                return
 
-                # --- RPC Confirmation ---
-                rpc_role = self.tree_node.get("rpc_router_role", "hive.rpc")
-                endpoints = self.get_nodes_by_role(rpc_role, return_count=1)
-                if not endpoints:
-                    self.log("No hive.rpc-compatible agents found for 'hive.rpc'.")
+            for cid in tp.get_subtree_nodes(target_id):  # skip the target itself
+                child = tp.get_node(cid)
+                if child and child.get("lifecycle_status", {}).get("locked"):
+                    self.log(f"[DELETE][ABORT] {target_id} has locked descendant '{cid}'. Aborting delete.")
                     return
 
-                remote_pub_pem = self._signing_keys.get("remote_pubkey")
+            trans_id = secrets.token_hex(8)
 
-                payload = {
-                    "handler": return_handler,
-                    "content": {
-                        "session_id": session_id,
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            mark = {
+                "lifecycle_status": {
+                    "locked": {
+                        "by": "matrix",
+                        "reason": "shutdown_delete",
+                        "timestamp": time.time(),
+                    },
+                    "op": "shutdown_delete",
+                    "op_stage": "shutdown_probe",
+                    "transaction_id": trans_id,
+                    "last_checked": time.time(),
+                    "agent_status_callback": {
+                        "operation": "delete_agent",
+                        "confirm_response": confirm_response,
+                        "response_handler": response_handler,
                         "token": token,
-                        "status": result.get("status", "error"),
-                        "error_code": result.get("error_code", 99),
-                        "message": result.get("message", "Deletion result."),
-                        "details": {
-                            "target_universal_id": result.get("target_universal_id"),
-                            "kill_list": result.get("kill_list", []),
-                            "reaped": result.get("reaped", 0),
-                            "existed": result.get("existed", 0),
-                            "deleted": result.get("deleted", 0)
-                        }
-                    }
+                        "session_id": session_id,
+                        "on_complete": "_delete_complete_callback"
+                    },
                 }
+            }
 
-                sealed = encrypt_with_ephemeral_aes(payload, remote_pub_pem)
-                content = {
-                    "serial": self._serial_num,
-                    "content": sealed,
-                    "timestamp": int(time.time()),
-                }
-                sig = sign_data(content, self._signing_key_obj)
-                content["sig"] = sig
-
-                pk1 = self.get_delivery_packet("standard.command.packet")
-                pk1.set_data({
-                    "handler": "dummy_handler",  # if a handler isn't set the packet will not set, without a handler
-                    "origin": self.command_line_args['universal_id'],
-                    "session_id": session_id,
-                    "content": content,
-                })
-
-                for ep in endpoints:
-                    pk1.set_payload_item("handler", ep.get_handler())
-                    self.pass_packet(pk1, ep.get_universal_id())
-
-
-        except Exception as e:
-            self.log("Failed to process cmd_delete_agent", error=e, block="main-try")
-
-
-    def _cmd_delete_agent(self, content, packet):
-        """Contains the core implementation for decommissioning an agent and its subtree.
-
-        This private method executes the multi-step process for safely and completely
-        removing an agent from the swarm. It is called by the public-facing
-        `cmd_delete_agent` handler.
-
-        The process includes:
-        1. Marking the target node and all its children as "deleted" in the master tree.
-        2. Saving the updated tree to persist this change.
-        3. Calling `drop_hit_cookies` to signal the live agents to terminate.
-        4. Injecting a 'reaper' agent to forcefully terminate any lingering processes.
-        5. Injecting a 'scavenger' agent to clean up the pod/comm directories.
-
-        Args:
-            content (dict): The command payload, requiring a 'target_universal_id'.
-            packet (dict): The raw packet data.
-
-        Returns:
-            dict: A result dictionary summarizing the outcome of the operation,
-                  including the status, kill list, and error messages.
-        """
-        result = {
-            "status": "error",
-            "error_code": 99,
-            "message": "",
-            "target_universal_id": None,
-            "kill_list": [],
-            "reaped": 0,
-            "existed": 0,
-            "deleted": 0,
-        }
-
-        try:
-            target = content.get("target_universal_id")
-            if not target:
-                result["message"] = "Missing target_universal_id."
-                return result
-
-            result["target_universal_id"] = target
-
-            tp = self.get_agent_tree_master()
-            if not tp:
-                result["message"] = "Failed to load directive."
-                return result
-
-            node_exists = tp.has_node(target)
-            result["existed"] = int(node_exists)
-
-            kill_list = tp.mark_deleted_and_get_kill_list(target)
-            result["kill_list"] = kill_list
-
-            if kill_list:
-
-                #save the deletions
-                self.save_agent_tree_master()
-
-                result["deleted"] = 1
-
-                self.drop_hit_cookies(kill_list)
-
-                #since no mission has been assigned, it will patrol perpetually
-                reaper_node = make_reaper_node(mission_name="reaper-guardian")
-
-                # Inject Reaper
-                reaper_packet = {
-                    "target_universal_id": "matrix",
-                    "subtree": reaper_node
-                }
-
-                reaper_result = self._cmd_inject_agents(reaper_packet, packet)
-
-                if reaper_result.get("status") == "success":
-                    result["reaped"] = 1
-                    self.log(f"[DELETE] ✅ Reaper injected: {reaper_node['universal_id']}")
-                else:
-                    self.log(f"[DELETE] ❌ Reaper injection failed: {reaper_result.get('message')}")
-
-                scavenger_node = make_scavenger_node(mission_name="scavenger-keeper")
-
-                # Inject Scavenger
-                scavenger_packet = {
-                    "target_universal_id": "matrix",
-                    "subtree": scavenger_node
-                }
-
-                scavenger_result = self._cmd_inject_agents(scavenger_packet, packet)
-
-                if scavenger_result.get("status") == "success":
-                    self.log(f"[DELETE] ✅ Scavenger injected: {scavenger_node['universal_id']}")
-                else:
-                    self.log(f"[DELETE] ❌ Scavenger injection failed: {scavenger_result.get('message')}")
-
-                result["status"] = "success"
-                result["message"] = f"Kill protocol deployed. Reaper + Scavenger set for: {kill_list}"
-
-
-                self.delegate_tree_to_agent("matrix", self.tree_path_dict)
-
-
-            else:
-                result["message"] = "No kill list generated. Agent might not exist."
-
-        except Exception as e:
-            self.log("Error inside _cmd_delete_agent", error=e, block="main_try")
-            result["message"] = str(e)
-
-        return result
-
-    def drop_hit_cookies(self, kill_list):
-
-        for agent in kill_list:
-            try:
-                comm_dir = os.path.join(self.path_resolution["comm_path"], agent, "hello.moto")
-                os.makedirs(comm_dir, exist_ok=True)  # ✅ Ensure path exists
-
-                cookie_path = os.path.join(comm_dir, "hit.cookie")
-
-                payload = {
-                    "target": agent,
-                    "reason": "deleted_by_matrix",
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-
-                with open(cookie_path, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=2)
-
-                self.log(f"[DELETE] Dropped hit.cookie for {agent}")
-
-            except Exception as e:
-
-                self.log(error=e, block="main_try")
-
-    #used to get a copy of the current agent_tree_master, usually sent from
-    #matrix-https to send back to gui
-    def cmd_deliver_agent_tree(self, content, packet, identity:IdentityObject = None):
-
-        try:
-            target = 'matrix-https'
-
-            # any agents that are subscribers of updates to master agent tree, get a copy
-            # agents that need the tree. Matrix-Https
-
-            tp = self.get_agent_tree_master()
-            if not tp:
+            # mark entire subtree
+            kill_list = tp.mark_target_list(target_id, mark, recurse_children=True)
+            if not kill_list:
+                self.log(f"[DELETE] No valid subtree found for {target_id}.")
                 return
 
-            data = {"agent_tree": tp.root}
-            football = self.get_football(type=self.FootballType.PASS)
-            football.load_identity_file(universal_id=target)
-
-            path = self.tree_path_dict.copy()
-
-            path['address'] = target
-            self.save_directive(path, data, football=football)
-
-        except Exception as e:
-
-            self.log(error=e, block="main_try")
-
-    def cmd_deletion_confirmation(self, content, packet, identity: IdentityObject = None):
-        """Processes a confirmation that an agent's resources have been cleaned up.
-
-        This handler is typically called by a 'scavenger' agent after it has
-        successfully removed the pod and comm directories of a deleted agent.
-        Its purpose is to mark the agent as fully decommissioned in the master
-        agent tree, providing a final state for forensic and operational history.
-
-        Args:
-            content (dict): The command payload, expecting a 'universal_id'
-                of the agent whose deletion is being confirmed.
-            packet (dict): The raw packet data.
-            identity (IdentityObject): The verified identity of the command sender,
-                which should be the scavenger agent.
-        """
-        try:
-            uid = content.get("universal_id")
-            if not uid:
-                self.log("Missing universal_id in confirmation.", block="deletion-confirm")
-                return
-
-            # Security check to ensure the confirmation comes from a trusted source
-            is_trusted_source = True # Default to true if encryption is off
-            if identity and identity.is_encryption_enabled():
-                if not identity.has_verified_identity() or identity.get_sender_uid() != 'scavenger-keeper':
-                    is_trusted_source = False
-
-            if is_trusted_source:
-                self.log(f"[CONFIRM-DELETE] ✅ Confirmed deletion from: {uid}")
-                tp = self.get_agent_tree_master()
-                if not tp:
-                    self.log("[CONFIRM-DELETE][ERROR] Failed to load agent_tree_master")
-                    return
-
-                node = tp.get_node(uid)
-                if node:
-                    node['confirmed_deleted'] = True
-                    self.log(f"[CONFIRM-DELETE] ⛔ Node {uid} marked confirmed_deleted")
-                    self.save_agent_tree_master()
-            else:
-                self.log(f"[CONFIRM-DELETE][DENIED] Untrusted source attempted to confirm deletion for {uid}")
-
-        except Exception as e:
-            self.log(error=e, block="main_try")
-
-    def cmd_validate_warrant(self, content, packet, identity:IdentityObject = None):
-        """Securely validates and executes a "death warrant" for an agent.
-
-        This method serves as the final step for self-terminating, mission-based
-        agents like the Reaper. The Reaper, upon completing its mission, sends
-        its unique, signed death warrant back to Matrix. This handler performs
-        a multi-step verification to ensure the warrant is authentic before
-        permanently removing the agent from the master tree.
-
-        The validation process includes:
-        1. Verifying the warrant's signature against the master Matrix public key.
-        2. Matching the agent ID in the packet with the ID inside the warrant.
-        3. Matching the unique 'death_id' in the warrant with the one assigned
-           to the agent's config when it was created.
-
-        Args:
-            content (dict): The command payload, containing the 'agent_id' and
-                the signed 'warrant' object.
-            packet (dict): The raw packet data.
-            identity (IdentityObject): The verified identity of the command sender.
-        """
-        try:
-            self.log(f"[WARRANT][DEBUG] Received packet content: {json.dumps(content, indent=2)}")
-            warrant = content.get("warrant")
-            agent_id = content.get("agent_id")
-
-            if not agent_id or not warrant:
-                self.log("[WARRANT] ❌ Missing required warrant fields.")
-                return
-
-            # Step 1: Verify signature
-            payload = warrant.get("payload")
-            signature = warrant.get("signature")
-            try:
-                verify_signed_payload(payload, signature, self.matrix_pub_obj)
-            except Exception as e:
-                self.log(f"❌ Invalid signature on warrant for {agent_id}", error=e)
-                return
-
-            # Step 2: Confirm agent ID match
-            if payload.get("universal_id") != agent_id:
-                self.log(f"[WARRANT] ❌ Mismatched universal_id in warrant: {payload['universal_id']} != {agent_id}")
-                return
-
-            # Step 3: Match against in-memory agent's death_id
-            tp = self.get_agent_tree_master()
-            if not tp:
-                self.log("[UPDATE_AGENT][ERROR] Failed to load tree.")
-                return
-
-            tree_node = tp.get_node(agent_id)
-            if not tree_node:
-                self.log(f"[WARRANT] ⚠️ No agent found in tree for {agent_id}")
-                return
-
-            node_warrant = tree_node.get("config", {}).get("death_warrant", {})
-            if warrant.get("death_id") != node_warrant.get("death_id"):
-                self.log(f"[WARRANT] ❌ Death ID mismatch for {agent_id}")
-                return
-
-            # Step 4: Delete from tree if all checks pass
-            self.log(f"[WARRANT] ✅ Death warrant validated. Removing node: {agent_id}")
-            tp.remove_exact_node(tree_node)
             self.save_agent_tree_master()
 
-        except Exception as e:
-            self.log("[WARRANT][ERROR] Warrant processing failed", error=e)
-
-
-    def cmd_forward_command(self, content, packet, identity:IdentityObject = None):
-        try:
-            target = content.get("target_universal_id")
-            folder = content.get("folder", "incoming")
-            inner = content.get("command")
-
-            if not (target and inner and inner.get("handler")):
-                self.log("[FORWARD][ERROR] Missing required fields.")
+            parent_node = tp.find_parent_of(target_id)
+            parent_id = parent_node.get("universal_id") if parent_node else None
+            if parent_id:
+                self.delegate_tree_to_agent(parent_id, self.tree_path_dict)
                 return
 
-            # Deep copy to preserve structure
-            forwarded_packet = inner.copy()
-
-            # 💥 Validate again if needed
-            if "handler" not in forwarded_packet:
-                self.log("[FORWARD][ERROR] Inner packet missing handler.")
-                return
-
-            # 🔍 Check if it's a config intent
-            is_config_packet = forwarded_packet.get("handler") == "__config__"
-
-            # 📦 Choose packet type
-            packet_type = "standard.general.json.packet" if is_config_packet else "standard.command.packet"
-            pk = self.get_delivery_packet(packet_type, new=True)
-            pk.set_data(forwarded_packet)
-
-            # 🚚 Deliver to the right place
-            self.pass_packet(pk, target)
+            self.log(f"[DELETE] 🧨 Marked {len(kill_list)} agents for deletion: {kill_list}")
 
         except Exception as e:
-            self.log(error=e, block="main_try")
+            self.log("[DELETE][ERROR] Failed to mark agents for deletion.", error=e)
 
-    def cmd_hotswap_agent(self, content, packet, identity:IdentityObject = None):
-        """Handles the command to replace a live agent with new code.
+    def _delete_complete_callback(self, tx_nodes, trans_id=None):
+        """Unlock, finalize, delegate, and report delete completion to Phoenix."""
+        tp = self.get_agent_tree_master()
 
-        This powerful command allows for zero-downtime updates. It performs
-        the following sequence:
-        1. Validates the `new_agent` payload, which can include new source code.
-        2. If new source code is provided, it's installed to the
-           `{active instance path}/.matrixswarm/agent/` directory.
-        3. The agent's node in the master tree is updated in-memory with the
-           new configuration.
-        4. The master tree is saved, and the updated directive slice is
-           re-delegated to the parent of the target agent.
-        5. A `reaper` agent is dispatched to cleanly terminate the old version
-           of the agent.
-        6. The parent agent's `spawn_manager` will then automatically
-           re-spawn the agent using its new source code and configuration.
+        for uid, _ in tx_nodes:
+            try:
+                node = tp.get_node(uid)
+                if not node:
+                    continue
 
-        Args:
-            content (dict): The payload containing 'target_universal_id' and
-                'new_agent' (the new agent definition and source code).
-            packet (dict): The raw packet data.
-            identity (IdentityObject): The verified identity of the command sender.
+                # Lifecycle + callback info
+                life = node.get("lifecycle_status", {})
+                cb_info = life.get("agent_status_callback", {}) or {}
+
+                # --- Unlock and mark completion ---
+                life.pop("locked", None)
+                life["op_stage"] = "_complete_callback"
+                life["last_checked"] = time.time()
+
+                # --- Remove node physically ---
+                tp._remove_node_and_children(uid)
+                self.log(f"[DELETE][FINALIZE] {uid} purged from tree.")
+
+                # --- Delegate parent slice back ---
+                parent_node = tp.find_parent_of(uid)
+                if parent_node:
+                    parent_id = parent_node.get("universal_id")
+                    self.delegate_tree_to_agent(parent_id, self.tree_path_dict)
+                    self.log(f"[DELETE][FINALIZE] delegated parent {parent_id}")
+
+                # --- Send callback to Phoenix ---
+                if cb_info:
+                    ctx = CallbackCtx(agent=self)
+                    ctx.set_rpc_role(self.tree_node.get("rpc_router_role", "hive.rpc"))
+                    ctx.set_response_handler(cb_info.get("response_handler", "delete_agent.result"))
+                    ctx.set_confirm_response(True)
+                    ctx.set_session_id(cb_info.get("session_id"))
+                    ctx.set_token(cb_info.get("token"))
+
+                    confirm_payload = {
+                        "universal_id": uid,
+                        "stage": "delete_complete",
+                        "result": {"success": True, "error": None},
+                        "callback_data": cb_info,
+                        "token": cb_info.get("token"),
+                        "session_id": cb_info.get("session_id"),
+                    }
+
+                    dispatcher = PhoenixCallbackDispatcher(self)
+                    dispatcher.dispatch(uid, ctx, confirm_payload)
+
+                    self.log(f"[DELETE][CALLBACK] Sent delete_complete for {uid}")
+
+                else:
+                    self.log("[DELETE][CALLBACK] No callback data found for node.")
+
+            except Exception as e:
+                self.log(error=e, block="_delete_complete_callback")
+
+        self.save_agent_tree_master()
+        tp.reparse()
+        if trans_id:
+            self._delegate_transaction_parent(tx_nodes, trans_id)
+
+    def _restart_complete_callback(self, tx_nodes, trans_id=None):
+        """Unlock, finalize, delegate, and report restart completion to Phoenix."""
+        tp = self.get_agent_tree_master()
+
+        for uid, _ in tx_nodes:
+            try:
+                node = tp.get_node(uid)
+                if not node:
+                    continue
+
+                life = node.get("lifecycle_status", {})
+                cb_info = life.get("agent_status_callback", {}) or {}
+
+                # Unlock node and stamp lifecycle
+                life.pop("locked", None)
+                life["op_stage"] = "_complete_callback"
+                life["last_checked"] = time.time()
+
+                # Re-delegate parent
+                parent_node = tp.find_parent_of(uid)
+                if parent_node:
+                    parent_id = parent_node.get("universal_id")
+                    self.delegate_tree_to_agent(parent_id, self.tree_path_dict)
+                    self.log(f"[RESTART][FINALIZE] delegated parent {parent_id}")
+
+                # --- Build secure confirmation back to Phoenix ---
+                if cb_info:
+                    ctx = CallbackCtx(agent=self)
+                    ctx.set_rpc_role(self.tree_node.get("rpc_router_role", "hive.rpc"))
+                    ctx.set_response_handler(cb_info.get("response_handler", "restart_dialog.result"))
+                    ctx.set_confirm_response(True)
+                    ctx.set_session_id(cb_info.get("session_id"))
+                    ctx.set_token(cb_info.get("token"))
+
+                    confirm_payload = {
+                        "universal_id": uid,
+                        "stage": "restart_complete",
+                        "result": {"success": True, "error": None},
+                        "callback_data": cb_info,
+                        "token": cb_info.get("token"),
+                        "session_id": cb_info.get("session_id"),
+                    }
+
+                    dispatcher = PhoenixCallbackDispatcher(self)
+                    dispatcher.dispatch(uid, ctx, confirm_payload)
+
+                else:
+                    self.log("[RESTART][CALLBACK] No callback data found for node.")
+
+            except Exception as e:
+                self.log(error=e, block="_restart_complete_callback")
+
+        self.save_agent_tree_master()
+        if trans_id:
+            self._delegate_transaction_parent(tx_nodes, trans_id)
+
+    def _cmd_hotswap_agent(self, content, packet, identity:IdentityObject=None):
         """
-
+        Hot-swap an agent's Python source or in-memory tree entry.
+        content:
+          {
+            "target_universal_id": "gatekeeper",
+            "source_payload": {"payload": "<b64>", "sha256": "..."},
+            "meta": {...},
+            "update_tree": bool,     # -> update only agent_tree_master
+            "update_source": bool,   # -> persist to disk under <site_root>/agents/
+            "restart": bool
+          }
+        """
         try:
-            new_agent = content.get("new_agent", {})
-            src = new_agent.get("source_payload")
+            target_universal_id = content.get("target_universal_id")
+            src = content.get("source_payload", {})
+            meta = content.get("meta", {})
+            update_tree = content.get("update_tree", False)
+            update_source = content.get("update_source", True)
+            restart_flag = content.get("restart", True)
 
-            target_uid = content.get("target_universal_id")
-
-            if not target_uid:
-                self.log("[REPLACE] Missing 'target_universal_id'. Cannot dispatch Reaper.")
+            if not target_universal_id or not src.get("payload"):
+                self.log("[HOTSWAP] ❌ Missing target_universal_id or payload.")
                 return
 
-            if target_uid == "matrix":
-                self.log("[REPLACE] Cannot target Matrix for self-replacement. Operation aborted.")
+            if target_universal_id == self.command_line_args.get('universal_id'):
+                self.log("[HOTSWAP][ERROR] Can't hotswap Matrix.")
                 return
 
-            #REPLACE AGENT
-            if src:
-                try:
-                    decoded = base64.b64decode(src["payload"]).decode()
-                    sha_check = hashlib.sha256(decoded.encode()).hexdigest()
+            reaper_id = self.meta.get("swarm_state", {}).get("reserved_agent_ids", {}).get("reaper", False)
+            if reaper_id and target_universal_id == reaper_id:
+                self.log("[HOTSWAP][ERROR] Don't fear The Reaper.")
+                return
 
-                    if sha_check != src["sha256"]:
-                        self.log(f"[REPLACE] ❌ SHA-256 mismatch. Payload rejected.")
-                        return
+            tp = self.get_agent_tree_master()
+            node = tp.get_node(target_universal_id)
+            if not node:
+                self.log(f"[HOTSWAP] ❌ Unknown agent '{target_universal_id}'")
+                return
 
-                    agent_name = new_agent["name"]
-                    #creates the directory of the new agent: {somepath}/.matrixswarm/agent/{agent_name}
-                    agent_dir = os.path.join(self.path_resolution["agent_path"], agent_name)
-                    os.makedirs(agent_dir, exist_ok=True)
+            code = base64.b64decode(src["payload"]).decode("utf-8")
+            sha = src.get("sha256") or hashlib.sha256(code.encode()).hexdigest()
 
-                    agent_path = os.path.join(agent_dir, f"{agent_name}.py")
-                    with open(agent_path, "w", encoding="utf-8") as f:
-                        f.write(decoded)
-
-                    self.log(f"[REPLACE] ✅ Live agent source written to {agent_path}")
-
-                except Exception as e:
-                    self.log(msg="❌ Failed to install source payload", error=e, block="replace-agent")
+            if update_source:
+                # Persist to disk under <site_root>/agents/<lang_core>/<agent>/<agent>.py
+                lang = node.get("lang", "python")
+                agent_name = node.get("name")
+                if not agent_name:
+                    self.log(f"[HOTSWAP] ❌ agent name is missing for '{target_universal_id}'")
                     return
+                base = self.path_resolution["agent_path"]
+                target_dir = os.path.join(base, agent_name)
+                os.makedirs(target_dir, exist_ok=True)
+                target_file = os.path.join(target_dir, f"{agent_name}.py")
 
-            if not self._validate_or_prepare_agent(new_agent):
-                self.log("[REPLACE] ❌ Validation or prep failed. Replacement skipped.")
-                return
+                with open(target_file, "w", encoding="utf-8") as f:
+                    f.write(f"#!/usr/bin/env python3\n# HOTSWAP {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(code)
+                self.log(f"[HOTSWAP] 💾 {target_universal_id} code written to {target_file}")
 
-            if not self._handle_replace_agent(content):
-                self.log("[REPLACE] ❌ Replacement failed. Tree untouched. Aborting Reaper dispatch.")
-                return
+            if update_tree:
+                # Update agent_tree_master’s copy of the code
+                node.setdefault("hotswap", {})["source_b64"] = src["payload"]
+                node["hotswap"]["sha256"] = sha
+                node["hotswap"]["timestamp"] = time.time()
+                node["hotswap"]["meta"] = meta
+                self.save_agent_tree_master()
+                self.log(f"[HOTSWAP] {target_universal_id} code stored in agent_tree_master.")
 
-            # 🎯 Gather kill list and full field set
-            kill_list = [target_uid]
+            if restart_flag:
+                self.log(f"[HOTSWAP] 🔁 Restarting {target_universal_id} …")
+                self._cmd_restart_subtree({"target_universal_id": target_universal_id}, packet, identity)
 
-            # 🛠 Create reaper node with full config
-            reaper_node = make_reaper_node(
-                targets=kill_list,
-                tombstone_comm=True,
-                tombstone_pod=True,
-                delay=4,
-                cleanup_die=True,
-                is_mission=True,
-            )
-
-            #when reaper self-bye-byes, he will drop this in death_warrant.json and Matrix will verify and
-            #remove from tree
-            death_id = secrets.token_hex(16)  # or uuid4().hex
-            warrant_payload = {
-                "universal_id": reaper_node["universal_id"],
-                "death_id": death_id,
-                "timestamp": time.time(),
-                "reason": "mission_complete"
+            # send confirmation back
+            confirm = {
+                "handler": "hotswap_agent.confirm",
+                "content": {
+                    "target_universal_id": target_universal_id,
+                    "sha256": sha,
+                    "message": f"Hotswap successful for {target_universal_id}"
+                }
             }
-
-            signed_warrant = generate_signed_payload(warrant_payload, self.matrix_priv_obj)
-
-            reaper_node['config']['death_warrant'] = signed_warrant
-
-            # Inject Reaper as a Matrix child
-            reaper_packet = {
-                "target_universal_id": "matrix",
-                "subtree": reaper_node
-            }
-
-            reaper_result = self._cmd_inject_agents(reaper_packet, packet)
-
-            if reaper_result.get("status") == "success":
-                self.log(f"[DELETE] ✅ Reaper injected: {reaper_node['universal_id']}")
-            else:
-                self.log(f"[DELETE] ❌ Reaper injection failed: {reaper_result.get('message')}")
-
-            self.delegate_tree_to_agent("matrix", self.tree_path_dict)
-
-            self.log(f"[REPLACE] 🧨 Reaper dispatched for {kill_list}")
+            #self._on_reaper_send_callback(target_universal_id, "hotswap_complete", confirm, {})
 
         except Exception as e:
-            self.log(error=e, block="main_try")
+            self.log(error=e, level="ERROR", block="_cmd_hotswap_agent")
 
     def _handle_replace_agent(self, content):
         old_id = content.get("target_universal_id")
@@ -829,7 +625,7 @@ class Agent(BootAgent):
             return False
 
         # Don't inject under parent, if marked for deletion or is deleted
-        if parent and (parent.get("deleted") or parent.get("confirmed_deleted")):
+        if parent.get("lifecycle_status", {}).get("locked"):
             self.log(f"Parent {parent} is deleted. Cannot inject new nodes.")
             return False
 
@@ -894,7 +690,7 @@ class Agent(BootAgent):
         self.log(f"[REPLACE-VALIDATE] ❌ No source found at {entry_file}. Replace aborted.")
         return False
 
-    def cmd_update_agent(self, content, packet, identity:IdentityObject = None):
+    def _cmd_update_agent(self, content, packet, identity:IdentityObject=None):
         """Handles the command to update a live agent's configuration.
 
         This command modifies the `config` block of a specified agent in the
@@ -960,7 +756,7 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(error=e, block="main_try")
 
-    def cmd_replace_source(self, content, packet, identity=None):
+    def _cmd_replace_source(self, content, packet, identity:IdentityObject=None):
         """
         Minimal source replacement for an agent. Called by GUI ReplaceAgentDialog.
         """
@@ -993,7 +789,7 @@ class Agent(BootAgent):
 
             with open(agent_path, "w", encoding="utf-8") as f:
                 f.write(decoded)
-
+                f.close()
             self.log(f"[REPLACE] ✅ Source written to {agent_path}")
 
             # --- RPC Confirmation ---
@@ -1005,7 +801,6 @@ class Agent(BootAgent):
 
             remote_pub_pem = self._signing_keys.get("remote_pubkey")
 
-            # expected matrixswarm/matrix_gui/core/dispatcher/inbound_dispatcher.py
             payload = {
                 "handler": return_handler,
                 "content": {
@@ -1047,7 +842,7 @@ class Agent(BootAgent):
             self.log("[REPLACE] ❌ Failed in cmd_replace_source", error=e, level="ERROR")
 
 
-    def cmd_inject_agents(self, content, packet, identity:IdentityObject = None):
+    def _cmd_inject_agents(self, content, packet, identity:IdentityObject = None):
         """Handler for dynamically injecting a new agent or subtree into the swarm.
 
         This command receives a request to add a new agent under a specified
@@ -1069,7 +864,7 @@ class Agent(BootAgent):
             response_handler = content.get("response_handler", None)  #sent back to gui, so it knows what handler to call
             response_id = content.get("response_id", 0)
 
-            ret = self._cmd_inject_agents(content, packet)
+            ret = self._handle_inject_agents(content, packet)
 
             if confirm_response and handler_role and handler and response_handler:
 
@@ -1130,7 +925,7 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(error=e, block="main_try")
 
-    def _cmd_inject_agents(self, content, packet):
+    def _handle_inject_agents(self, content, packet):
 
         parent = content.get("target_universal_id")
         subtree = content.get("subtree")
@@ -1169,7 +964,6 @@ class Agent(BootAgent):
             self.log(ret["message"])
             return ret
 
-
         # Check for parent node existence
         if not tp.has_node(parent):
             ret["error_code"] = 2
@@ -1180,14 +974,14 @@ class Agent(BootAgent):
 
         # Don't inject under parent, if marked for deletion or is deleted
         parent_node = tp.get_node(parent)
-        if parent_node and (parent_node.get("deleted") or parent_node.get("confirmed_deleted")):
+        if parent_node and parent_node.get("lifecycle_status", {}).get("locked"):
             self.log(f"[INJECT][BLOCKED] Parent {parent} is deleted. Cannot inject new nodes.")
             ret["status"] = "error"
             ret["message"] = f"Parent {parent} is deleted. Injection blocked."
             ret["error_code"] = 8
             return ret
 
-        # 🔒 Scan subtree for any node with matrix identity
+        # Scan subtree for any node with matrix identity
         def contains_matrix_node(tree):
             if not isinstance(tree, dict):
                 return False
@@ -1249,7 +1043,7 @@ class Agent(BootAgent):
                             config = subtree.get("config", {})
                             if existing_node and bool(config):
                                 # THIS is the important push
-                                self.cmd_update_agent({
+                                self._cmd_update_agent({
                                     "target_universal_id": universal_id,
                                     "config": config,
                                     "push_live_config": True
@@ -1277,8 +1071,7 @@ class Agent(BootAgent):
                     for node in TreeParser.flatten_tree(subtree):
                         src = node.get("source_payload")
                         name = node.get("name")
-                        if src and name:
-                            self._save_payload_to_boot_dir(name, src)
+
 
             else:
 
@@ -1305,9 +1098,6 @@ class Agent(BootAgent):
                     ret["message"] = f"[INJECT][ERROR] Insert failed. Rejected node: {universal_id}"
                 else:
                     self.log(f"[INJECT] ✅ Injected agent '{universal_id}' under '{parent}'.")
-                    if src:
-                        self._save_payload_to_boot_dir(agent_name, src)
-
                     success=True
 
             if success:
@@ -1340,25 +1130,24 @@ class Agent(BootAgent):
 
         return ret
 
-    def cmd_restart_subtree(self, content, packet, identity: IdentityObject = None):
-        """Gracefully restarts an agent or its entire subtree.
+
+
+    def _cmd_restart_subtree(self, content, packet, identity: IdentityObject = None):
+        """
+        Gracefully restarts an agent or its entire subtree.
 
         By default, restarts only the target agent.
         If content["restart_full_subtree"] = True, restarts the entire subtree.
         """
-
         try:
-            target_id = content.get("universal_id")
-
-            # is a response expected
+            target_universal_id = content.get("target_universal_id")
             confirm_response = bool(content.get("confirm_response", 0))
-            # this is the client rpc handler which handles the response
             response_handler = content.get("return_handler")
             token = content.get("token", 0)
             session_id = content.get("session_id")
+            full_flag = bool(content.get("restart_full_subtree", False))
 
-
-            if not target_id:
+            if not target_universal_id:
                 self.log("[RESTART][ERROR] Missing universal_id.")
                 return
 
@@ -1367,165 +1156,61 @@ class Agent(BootAgent):
                 self.log("[RESTART][ERROR] Failed to load tree.")
                 return
 
-            parent_node = tp.get_node(target_id)
-            if parent_node and (parent_node.get("deleted") or parent_node.get("confirmed_deleted")):
-                self.log(f"[RESTART][BLOCKED] {target_id} is deleted. Cannot restart.")
-                return
+            for cid in tp.get_subtree_nodes(target_universal_id):  # skip the target itself
+                child = tp.get_node(cid)
+                if child and child.get("lifecycle_status", {}).get("locked"):
+                    self.log(f"[RESTART][ABORT] {target_universal_id} has locked descendant '{cid}'. Aborting restart.")
+                    return
 
-            # check flag - restart a single target or the whole branch
-            if content.get("restart_full_subtree", False):
-                ids = tp.get_subtree_nodes(target_id)  # full family
-                self.log(f"[RESTART] Restarting full subtree for {target_id}: {ids}")
+
+            # Scope
+            recurse_children = False
+            if full_flag:
+                ids = tp.get_subtree_nodes(target_universal_id)
+                self.log(f"[RESTART] Restarting full subtree for {target_universal_id}: {ids}")
+                recurse_children = True
             else:
-                ids = [target_id]  # just the agent itself
-                self.log(f"[RESTART] Restarting single agent only: {target_id}")
+                ids = [target_universal_id]
+                self.log(f"[RESTART] Restarting single agent only: {target_universal_id}")
 
-            # 🛠 Create reaper node with restart flags
-            reaper_node = make_reaper_node(
-                targets=ids,
-                tombstone_comm=False,
-                tombstone_pod=False,
-                delay=4,
-                cleanup_die=True,
-                is_mission=True,
-            )
+            trans_id = secrets.token_hex(8)
 
-            # Death warrant (temporary agent self-destruct after mission)
-            death_id = secrets.token_hex(16)
-            death_confirmation = {
-                "universal_id": target_id,
-                "death_id": death_id,
-                "timestamp": time.time(),
-                "reason": "mission_complete",
+            # Prime common values (Matrix-side best-effort)
+            comm_path = self.path_resolution["comm_path"]
+
+            mark = {
+                "lifecycle_status": {
+                    "locked": {
+                        "by": "matrix",
+                        "reason": "shutdown_restart",
+                        "timestamp": time.time()
+                    },
+                    "transaction_id": trans_id,
+                    "op": "shutdown_restart",
+                    "op_stage": "shutdown_probe",  # Reaper will probe first
+                    "last_checked": time.time(),
+                    "comm_path": comm_path,
+                    "agent_status_callback": {
+                        "operation": "restart_subtree",
+                        "restart_full_subtree": full_flag,
+                        "confirm_response": confirm_response,
+                        "response_handler": response_handler,
+                        "token": token,
+                        "session_id": session_id,
+                        "on_complete": "_restart_complete_callback"
+                    }
+                }
             }
 
-            if content.get("session_id", False):
-                return
+            tp.mark_target_list(target_universal_id, mark, recurse_children=recurse_children)
+            self.save_agent_tree_master()
 
-            if content.get("session_id", False):
-                death_confirmation['confirmation']['session_id'] = content["session_id"]
-
-            if content.get("return_handler"):
-                death_confirmation['confirmation']['return_handler'] = content["return_handler"]
-
-            signed_warrant = generate_signed_payload(death_confirmation, self.matrix_priv_obj)
-            reaper_node['config']['death_confirmation'] = signed_warrant
-
-            # Inject Reaper
-            reaper_packet = {
-                "target_universal_id": "matrix",
-                "subtree": reaper_node,
-                "ephemeral_agent": True,
-            }
-
-            self._cmd_inject_agents(reaper_packet, packet)
-            self.log(f"[RESTART] ✅ Reaper injected, restart initiated for {ids}")
+            self.log(f"[RESTART] ✅ Marked {len(ids)} agent(s) for restart (probe stage queued): {ids}")
 
         except Exception as e:
             self.log(error=e, block="main_try", level="ERROR")
 
 
-    def cmd_shutdown_subtree(self, content, packet, identity:IdentityObject = None):
-        """Initiates a graceful shutdown of an agent and its entire subtree.
-
-        This method works by dropping a 'die' file into the `/incoming`
-        directory of the target agent and all of its descendants. The agents'
-        `enforce_singleton` thread monitors for this file and will trigger a
-        clean shutdown of the agent process upon detection.
-
-        Args:
-            content (dict): The payload containing the 'universal_id' of the
-                root of the subtree to be shut down.
-            packet (dict): The raw packet data.
-            identity (IdentityObject): The verified identity of the command sender.
-        """
-        target_id = content.get("universal_id")
-        if not target_id:
-            self.log("[SHUTDOWN][ERROR] Missing universal_id.")
-            return
-
-        tp = self.get_agent_tree_master()
-        if not tp:
-            self.log("[SHUTDOWN][ERROR] Failed to load tree.")
-            return
-
-        # Don't inject under parent, if marked for deletion or is deleted
-        parent_node = tp.get_node(target_id)
-        if parent_node and (parent_node.get("deleted") or parent_node.get("confirmed_deleted")):
-            self.log(f"[INJECT][BLOCKED] Parent {target_id} is deleted. Cannot inject new nodes.")
-            return
-
-
-        ids = tp.get_subtree_nodes(target_id)
-        for uid in ids:
-            die_path = os.path.join(self.path_resolution["comm_path"], uid, "incoming", "die")
-            os.makedirs(os.path.dirname(die_path), exist_ok=True)
-            with open(die_path, "w", encoding="utf-8") as f:
-                f.write("☠️")
-            self.log(f"[SHUTDOWN] Dropped .die for {uid}")
-
-    def cmd_resume_subtree(self, content, packet, identity:IdentityObject = None):
-        """Resumes a previously shut-down agent and its subtree.
-
-        This method is the inverse of `cmd_shutdown_subtree`. It removes the
-        'die' and 'tombstone' files from the `/incoming` directory of the
-        target agent and all of its descendants. Once the 'die' file is gone,
-        the parent agent's `spawn_manager` will detect that the agent is down
-        (via a stale heartbeat) and automatically resurrect it.
-
-        Args:
-            content (dict): The payload containing the 'universal_id' of the
-                root of the subtree to be resumed.
-            packet (dict): The raw packet data.
-            identity (IdentityObject): The verified identity of the command sender.
-        """
-        target_id = content.get("universal_id")
-        if not target_id:
-            self.log("[RESUME][ERROR] Missing universal_id.")
-            return
-
-        tp = self.get_agent_tree_master()
-        if not tp:
-            self.log("[RESUME][ERROR] Failed to load tree.")
-            return
-
-        # Don't inject under parent, if marked for deletion or is deleted
-        parent_node = tp.get_node(target_id)
-        if parent_node and (parent_node.get("deleted") or parent_node.get("confirmed_deleted")):
-            self.log(f"[INJECT][BLOCKED] Parent {target_id} is deleted. Cannot resume agent.")
-            return
-
-        ids = tp.get_subtree_nodes(target_id)
-        for uid in ids:
-            die = os.path.join(self.path_resolution["comm_path"], uid, "incoming", "die")
-            tomb = os.path.join(self.path_resolution["comm_path"], uid, "incoming", "tombstone")
-
-            for path in [die, tomb]:
-                if os.path.exists(path):
-                    os.remove(path)
-                    self.log(f"[RESUME] Removed {os.path.basename(path)} for {uid}")
-
-    def _save_payload_to_boot_dir(self, agent_name, src):
-        try:
-
-            decoded = base64.b64decode(src["payload"]).decode()
-            sha_check = hashlib.sha256(decoded.encode()).hexdigest()
-
-            if sha_check != src["sha256"]:
-                self.log(f"[INJECT][SHA-FAIL] {agent_name} payload hash mismatch.")
-                return
-
-            dir_path = os.path.join(self.path_resolution["root_path"], "boot_payload", agent_name)
-            os.makedirs(dir_path, exist_ok=True)
-
-            file_path = os.path.join(dir_path, f"{agent_name}.py")
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(decoded)
-
-            self.log(f"[INJECT] ✅ Source code installed at {file_path}")
-
-        except Exception as e:
-            self.log(error=e, block="main_try")
 
     #checks everyone's tree against Matrix's agent_tree_master, using a hash of the agents tree
     #this also ensures services are updated for agents added and removed
@@ -1547,7 +1232,7 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(error=e, block="main_try")
 
-    def cmd_service_request(self, content, packet, identity: IdentityObject = None):
+    def _cmd_service_request(self, content, packet, identity: IdentityObject = None):
         """
         Dispatch a generic service request to one or more agents that advertise a role.
 
@@ -1618,6 +1303,7 @@ class Agent(BootAgent):
         """
         try:
             #load the agent_tree_master
+
             tp = self.get_agent_tree_master()
             if not tp:
                 self.log(f"Failed to load master tree for {universal_id}")
@@ -1632,15 +1318,19 @@ class Agent(BootAgent):
                 self.log(f"No subtree found for {universal_id}, sending empty tree.")
                 subtree = {}
 
+            if subtree.get('lifecycle_status',{}).get("op", False) == "shutdown_delete":
+                self.log(f"[SPAWN-ERROR] Attempted to spawn deleted agent {universal_id}. Blocking.")
+                return
+
             try:
                 #SAVE IDENTITY FILE to comm/{universal_id}/codex
                 identity={"identity": subtree.get("vault",{}).get("identity", {}), "sig": subtree.get("vault",{}).get("sig", {})}
 
                 dir = os.path.join(self.path_resolution["comm_path"], universal_id, "codex")
-                os.makedirs(dir, exist_ok=True)
                 fpath = os.path.join(dir, "signed_public_key.json")
                 with open(fpath, "w", encoding="utf-8") as f:
                     json.dump(identity, f, indent=2)
+                    f.close()
 
             except Exception as e:
                 self.log(error=e, block='write_signed_public_key')
@@ -1663,7 +1353,7 @@ class Agent(BootAgent):
                 self.log(f"Tree delivered to {universal_id}")
 
         except Exception as e:
-            self.log(error=e, block="main-try")
+            self.log(error=e, block="main_try")
 
     def get_agent_tree_master(self):
         """Loads the agent_tree_master.json from disk into memory.
@@ -1676,9 +1366,12 @@ class Agent(BootAgent):
         Returns:
             TreeParser: An object representing the entire agent tree, or None.
         """
-        if not hasattr(self, "_agent_tree_master") or self._agent_tree_master is None:
+        if self._agent_tree_master is None:
             football = self.get_football(type=self.FootballType.CATCH)
             self._agent_tree_master = self.load_directive(self.tree_path_dict, football)
+            if hasattr(self._agent_tree_master, "root"):
+                self._meta = self._agent_tree_master.root.get('meta', {})
+
             self.log("[TREE] agent_tree_master loaded into memory.")
 
         return self._agent_tree_master
@@ -1698,13 +1391,13 @@ class Agent(BootAgent):
             bool: True if the save was successful, False otherwise.
         """
         try:
-            if not hasattr(self, "_agent_tree_master") or self._agent_tree_master is None:
+            if self._agent_tree_master is None:
                 self.log("[TREE][WARN] Cannot save — agent_tree_master not loaded.")
                 return False
 
             self._agent_tree_master.pre_scan_for_duplicates(self._agent_tree_master.root)
 
-            data = {"agent_tree": self._agent_tree_master.root}
+            data = {"agent_tree": self._agent_tree_master.root, "meta": self.meta}
             football = self.get_football(type=self.FootballType.PASS)
             football.load_identity_file(vault=self.tree_node['vault'], universal_id='matrix')
             self.save_directive(self.tree_path_dict, data, football=football)
@@ -1756,7 +1449,7 @@ class Agent(BootAgent):
             self.log("[TREE][ERROR] Failed to save agent_tree_master.", error=e)
             return False
 
-    def perform_agent_consciousness_scan(self, time_delta_timeout=0, flip_threshold=3, flip_window=60):
+    def _perform_agent_consciousness_scan(self, time_delta_timeout=0, flip_threshold=3, flip_window=60):
         """
         Evaluates each agent's heartbeat (from poke files) and spawn history (flip-tripping).
         Stores results inside node["agent_status"]. Broadcasts updated tree to relays if live.
@@ -1810,6 +1503,7 @@ class Agent(BootAgent):
                         for f in sorted(Path(spawn_dir).glob("*.spawn"), reverse=True)[:5]:  # last 5
                             with open(f, encoding="utf-8") as fh:
                                 info = json.load(fh)
+                                fh.close()
                                 spawn_records.append({
                                     "timestamp": info.get("timestamp"),
                                     "note": info.get("uuid", "")
@@ -1872,7 +1566,8 @@ class Agent(BootAgent):
                 if live_relays:
                     self.save_agent_tree_master(push_tree_home=True)
                 else:
-                    self.log("[TREE] Skipped broadcast (no fresh relays)")
+                    if self.debug.is_enabled():
+                        self.log("[TREE] Skipped broadcast (no fresh relays)")
 
         except Exception as e:
             self.log(error=e, block="main_try")
@@ -1917,8 +1612,46 @@ class Agent(BootAgent):
         return alive_sessions
 
     def cmd_deliver_agent_tree_to_child(self, content, packet, identity: IdentityObject = None):
+        """
+        Handles delivery of the current agent tree to a verified child agent.
+
+        This command is typically triggered when a child agent requests its
+        delegated slice of the overall swarm tree (e.g., via `request_agent_tree()`).
+        Matrix verifies the sender’s identity, determines the requesting agent’s
+        universal ID, and then sends the appropriate portion of the agent tree
+        to that agent.
+
+        Behavior:
+            - If encryption is disabled, the universal_id is read directly from the
+              packet content.
+            - If encryption is enabled, the universal_id is extracted from the verified IdentityObject.
+            - Logs an error and aborts if the universal_id cannot be determined.
+
+        Args:
+            content (dict): The packet’s inner content dictionary. Expected to contain
+                "universal_id" when encryption is disabled.
+            packet (dict): The full command packet structure that invoked this handler.
+            identity (IdentityObject, optional): A verified sender identity object
+                provided by the cryptographic layer. Used to confirm the source and
+                extract its universal_id when encryption is active.
+
+        Returns:
+            None
+
+        Raises:
+            Logs any unexpected exceptions internally via `self.log()`.
+        """
         try:
-            uid = content.get("universal_id", False)
+
+            uid = None
+            if not self.encryption_enabled:
+                uid = content.get("universal_id", False)  # swarm running in plaintext mode
+
+            else:
+                # reject invalid or missing identity
+                if isinstance(identity, IdentityObject) and identity.has_verified_identity():
+                     uid = identity.get_sender_uid()
+
             if not uid:
                 self.log("[DELIVER-TREE][ERROR] Missing universal_id.")
                 return

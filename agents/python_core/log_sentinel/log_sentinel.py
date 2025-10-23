@@ -1,4 +1,4 @@
-# Authored by Daniel F MacDonald and ChatGPT-5 aka The Generals
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import os
 import sys
 import time

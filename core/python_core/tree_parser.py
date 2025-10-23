@@ -1,5 +1,3 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
-#Gemini, docstring and code enhancements.
 import time
 import tempfile
 import base64
@@ -610,7 +608,6 @@ class TreeParser(LogMixin):
 
             return None
 
-        print(f"[FIND_PARENT] Starting parent search for {child_universal_id}")
         return recurse(self.root)
 
     def get_subtree_nodes(self, universal_id):
@@ -768,30 +765,28 @@ class TreeParser(LogMixin):
         except Exception as e:
             raise RuntimeError(f"[GOSPEL-KEY] Failed to assign identity token for '{uid}': {e}")
 
-    def mark_deleted_and_get_kill_list(self, target_uid):
-        """
-        Marks the given node and all its children as 'deleted': True.
-        Returns a flat list of all affected universal_ids.
-        """
-        kill_list = []
+    # in TreeParser class
+    def mark_target_list(self, target_uid: str, mark: dict, recurse_children: bool = True):
+        """Mark target_uid and optionally its descendants with `mark` dict."""
+        affected = []
 
-        def recurse_mark(node):
-            if not node or not isinstance(node, dict):
+        def recurse(node):
+            if not isinstance(node, dict):
                 return
-            uid = node.get(self.UNIVERSAL_ID_KEY)
+            uid = node.get("universal_id") or node.get(self.UNIVERSAL_ID_KEY)
             if uid:
-                node["deleted"] = True
-                kill_list.append(uid)
-            for child in node.get(self.CHILDREN_KEY, []):
-                recurse_mark(child)
+                node.update(mark)
+                affected.append(uid)
+            if recurse_children:
+                for child in node.get(self.CHILDREN_KEY, []):
+                    recurse(child)
 
         target_node = self.get_node(target_uid)
         if target_node:
-            recurse_mark(target_node)
+            recurse(target_node)
         else:
-            print(f"[TREE-KILL] ❌ Node '{target_uid}' not found.")
-
-        return kill_list
+            print(f"[MARK] ❌ Node '{target_uid}' not found.")
+        return affected
 
     def strip_disabled_nodes(self, node):
         """

@@ -1,3 +1,4 @@
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import sys
 import os
 sys.path.insert(0, os.getenv("SITE_ROOT"))
@@ -7,7 +8,7 @@ import time
 import hashlib
 import inotify.adapters
 import threading
-
+from core.python_core.utils.swarm_sleep import interruptible_sleep
 from core.python_core.boot_agent import BootAgent
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 
@@ -19,12 +20,12 @@ class Agent(BootAgent):
         self.watch_path = config.get("watch_path", "/etc/")
         self.send_to = config.get("send_to", "mailman-1")
         self.agent_id = self.command_line_args.get("universal_id", "filewatch")
-
+        self.interval = 30
         self.target_payload = os.path.join(
             self.path_resolution["comm_path"], self.send_to, "payload"
         )
         os.makedirs(self.target_payload, exist_ok=True)
-        self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
+        self._emit_beacon = self.check_for_thread_poke("worker", timeout=self.interval*2, emit_to_file_interval=10)
 
     def post_boot(self):
         self.log(f"[FILEWATCH] Booted. Watching: {self.watch_path}, Reporting: {self.send_to}")
@@ -46,7 +47,6 @@ class Agent(BootAgent):
 
                 if event is None:
                     # No events in last 5s → still alive, emit heartbeat
-                    self._emit_beacon()
                     continue
 
                 # We have a filesystem event
@@ -58,8 +58,6 @@ class Agent(BootAgent):
                     if self.debug.is_enabled():
                         self.log(f"[FILEWATCH] {event_type}: {full_path}")
 
-                    # Emit beacon after handling an event too
-                    self._emit_beacon()
                 except Exception as e:
                     self.log(f"[FILEWATCH][ERROR] {event_type}: {e}")
         except Exception as e:
@@ -76,6 +74,19 @@ class Agent(BootAgent):
         outpath = os.path.join(self.target_payload, f"{int(time.time())}_{hashval}.json")
         #with open(outpath, "w", encoding="utf-8") as f:
         #    json.dump(entry, f, indent=2)
+
+    def worker(self, config: dict = None, identity: IdentityObject = None):
+        """
+        The main loop for the agent. It ensures the `tail_log` thread is running
+        and then sleeps for the configured interval.
+
+        Args:
+            config (dict, optional): Configuration passed to the worker.
+            identity (IdentityObject, optional): The agent's identity.
+        """
+        self._emit_beacon()
+
+        interruptible_sleep(self, 10)
 
 if __name__ == "__main__":
     agent = Agent()

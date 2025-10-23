@@ -56,25 +56,19 @@ def guard_packet_size(pk: dict, log=print) -> bool:
         log(f"[ACL] Packet too large: {pkt_bytes} > {MAX_PACKET_BYTES}")
         return False
 
-    # 2) Handler sanity
-    handler = pk.get("handler")
-    if not isinstance(handler, str) or not handler or len(handler) > MAX_HANDLER_LEN:
-        log(f"[ACL] Bad handler length: {len(handler) if isinstance(handler, str) else 'n/a'}")
-        return False
-
-    # 3) Content subtree budget
+    # 2) Content subtree budget
     content = pk.get("content", {})
     if _byte_len(content) > MAX_CONTENT_BYTES:
         log("[ACL] Content too large")
         return False
 
-    # 4) Total fields + nesting depth
+    # 3) Total fields + nesting depth
     total_fields = _count_fields(pk)
     if total_fields > MAX_FIELDS_TOTAL:
         log(f"[ACL] Too many fields: {total_fields} > {MAX_FIELDS_TOTAL}")
         return False
 
-    # 5) Any string unreasonably big / excessive nesting
+    # 4) Any string unreasonably big / excessive nesting
     if not _validate_strings(pk):
         log("[ACL] Oversized string field or excessive nesting depth")
         return False

@@ -1,5 +1,4 @@
 # Authored by Daniel F MacDonald and ChatGPT aka The Generals
-# Docstrings by Gemini
 import sys
 import os
 

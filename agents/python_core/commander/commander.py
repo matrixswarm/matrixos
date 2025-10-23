@@ -1,7 +1,4 @@
-# Matrix: An AI OS System
-# Copyright (c) 2025 Daniel MacDonald
-# Licensed under the MIT License. See LICENSE file in project root for details.
-
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 import sys
 import os
 sys.path.insert(0, os.getenv("SITE_ROOT"))

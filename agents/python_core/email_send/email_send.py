@@ -1,7 +1,5 @@
-# email_relay.py
 # Authored by Daniel F MacDonald and ChatGPT aka The Generals
-# Refactored by Gemini
-
+# Gemini, code enhancements and Docstrings
 import sys
 import os
 import smtplib

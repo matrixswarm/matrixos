@@ -147,6 +147,7 @@ class DeliveryAgent(BaseDeliveryAgent, LogMixin):
                         with open(full_path, "w", encoding="utf-8") as f:
                             self._sent_packet=data
                             json.dump(data, f, indent=indent)
+                            f.close()
 
                     self._save_filename = full_path
 

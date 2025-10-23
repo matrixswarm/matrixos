@@ -1,3 +1,4 @@
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
 # ╔════════════════════════════════════════════════════════════╗
 # ║            📅 GOOGLE CALENDAR AGENT (v1) — SCOUT           ║
 # ║   Scans calendar events and relays to swarm in real time  ║

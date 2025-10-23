@@ -1,7 +1,7 @@
-#Authored by Daniel F MacDonald and ChatGPT aka The Generals
 """
 Core Spawner for the MatrixSwarm Framework.
-
+Authored by Daniel F MacDonald and ChatGPT aka The Generals
+Gemini, code enhancements and Docstrings
 This module defines the CoreSpawner class, which is the central engine for
 instantiating, managing, and terminating agents within the MatrixSwarm. It handles
 the entire lifecycle of an agent, from setting up its dedicated communication
@@ -471,11 +471,6 @@ class CoreSpawner(CoreSpawnerSecureMixin):
             logger.log(f"[SPAWN-LOG] Spawn recorded for PID {process.pid}")
 
         except Exception as e:
-            tb = traceback.format_exc()
-            if logger:
-                logger.log(f"[SPAWN-ERROR] Failed to spawn agent '{agent_name}': {e}")
-                logger.log(f"[SPAWN-TRACEBACK] {tb}")
-
             raise RuntimeError(f"[SPAWN-FAIL] Unhandled exception during spawn of {agent_name}: {e}")
 
         return process.pid, cmd

@@ -1,6 +1,4 @@
-# 📡 SlackRelayAgent — Forwards Swarm Logs to Slack
 # Authored by Daniel F MacDonald and ChatGPT aka The Generals
-
 import sys
 import os
 import json

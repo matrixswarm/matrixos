@@ -1,5 +1,5 @@
 # Authored by Daniel F MacDonald and ChatGPT aka The Generals
-# Docstrings by Gemini
+# Gemini Docstrings
 """
 A lightweight file system integrity monitor agent for the Matrix Swarm.
 
