@@ -12,16 +12,14 @@ sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 
 from core.python_core.boot_agent import BootAgent
-from core.python_core.utils.swarm_sleep import interruptible_sleep
 from core.python_core.class_lib.packet_delivery.utility.encryption.config import ENCRYPTION_CONFIG
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 from core.python_core.class_lib.logging.logger import Logger
 from core.python_core.utils.crypto_utils import encrypt_with_ephemeral_aes,  sign_data, pem_fix
 
-
 class Agent(BootAgent):
     """
-    LogSentinel — tails an agent.log, streams lines back to Matrix via
+    LogStreamer — tails an agent.log, streams lines back to Matrix via
     ephemeral rpc_handler, supports start_line offsets, and handles rotation.
     """
 
@@ -39,7 +37,7 @@ class Agent(BootAgent):
 
             self.rpc_role=self.tree_node.get("rpc_router_role", "hive.rpc")
 
-            # decryption
+            # encryption
             self.key_bytes = None
             if ENCRYPTION_CONFIG.is_enabled():
                 swarm_key = ENCRYPTION_CONFIG.get_swarm_key()
@@ -58,7 +56,7 @@ class Agent(BootAgent):
             self.log(error=e, block="main_try")
 
     def post_boot(self):
-        self.log(f"{self.NAME} v{self.AGENT_VERSION} – LogSentinel standing guard.")
+        self.log(f"{self.NAME} v{self.AGENT_VERSION} – LogStreamer standing guard.")
         threading.Thread(target=self._monitor_sessions, daemon=True).start()
 
     def _monitor_sessions(self, check_interval: int = 15, threshold: int = 30):
@@ -108,7 +106,7 @@ class Agent(BootAgent):
             "agent.log"
         )
         if not os.path.exists(log_path):
-            self.log(f"[LOGSENTINEL] ❌ No log file for {target} at {log_path}")
+            self.log(f"[LOG_STREAMER] ❌ No log file for {target} at {log_path}")
             return
 
         # Stop existing stream for this session if any
@@ -133,7 +131,7 @@ class Agent(BootAgent):
             "created": time.time()
         }
         t.start()
-        self.log(f"[LOGSENTINEL] 🎬 Streaming started for {target}, sess={sess}, start_line={start_line}")
+        self.log(f"[LOG_STREAMER] 🎬 Streaming started for {target}, sess={sess}, start_line={start_line}")
 
     def cmd_stop_stream_log(self, content, packet, identity: IdentityObject = None):
         """Stop streaming logs for a session."""
@@ -142,9 +140,7 @@ class Agent(BootAgent):
             return
         self.active_streams[sess]["stop"].set()
         self.active_streams.pop(sess, None)
-        self.log(f"[LOGSENTINEL] 🛑 Stopped log stream for sess={sess}")
-
-
+        self.log(f"[LOG_STREAMER] 🛑 Stopped log stream for sess={sess}")
 
     def _hash_lines(self, lines: list[str]) -> str:
         """
@@ -166,7 +162,7 @@ class Agent(BootAgent):
 
             log_path = stream.get("log_path")
             if not log_path or not os.path.exists(log_path):
-                self.log(f"[LOGSENTINEL] ❌ Missing log_path for stream {sess}")
+                self.log(f"[LOG_STREAMER] ❌ Missing log_path for stream {sess}")
                 return
 
             f = open(log_path, "r", encoding="utf-8")
@@ -187,7 +183,7 @@ class Agent(BootAgent):
                 try:
                     st = os.stat(log_path)
                     if st.st_ino != last_inode:
-                        self.log("[LOGSENTINEL] 🔄 Log rotated, reopening...")
+                        self.log("[LOG_STREAMER] 🔄 Log rotated, reopening...")
                         f.close()
                         f = open(log_path, "r", encoding="utf-8")
                         last_inode = st.st_ino
@@ -236,7 +232,7 @@ class Agent(BootAgent):
 
                     if self.debug.is_enabled():
                         h = self._hash_lines(rendered)
-                        self.log(f"[LOGSENTINEL] 🚀 Broadcasting {len(rendered)} lines hash={h} sess={sess}")
+                        self.log(f"[LOG_STREAMER] 🚀 Broadcasting {len(rendered)} lines hash={h} sess={sess}")
 
                     self._broadcast_log_lines(token, target, sess, offset, rendered)
                     offset += len(new_lines)
@@ -267,7 +263,6 @@ class Agent(BootAgent):
     def _broadcast_log_lines(self, token: str, target: str, sess: str, offset: int, lines: list):
         try:
 
-
             self.log(f"🚨 ENTERED _broadcast_log_lines: sess={sess}, lines={len(lines)}", level="INFO")
 
             endpoints = self.get_nodes_by_role(self.rpc_role, return_count=1)
@@ -277,7 +272,6 @@ class Agent(BootAgent):
 
             remote_pub_pem = self._signing_keys.get("remote_pubkey")
 
-            #expected matrixswarm/matrix_gui/core/dispatcher/inbound_dispatcher.py
             return_handler = self.active_streams.get(sess, {}).get("return_handler", "agent_log_view.update")
             payload = {
                 "handler": return_handler,
@@ -313,7 +307,7 @@ class Agent(BootAgent):
                 self.pass_packet(pk1, ep.get_universal_id())
 
         except Exception as e:
-            self.log("[LOGSENTINEL][ERROR] Failed to broadcast log lines", error=e)
+            self.log("[LOG_STREAMER][ERROR] Failed to broadcast log lines", error=e)
 
 if __name__ == "__main__":
     agent = Agent()

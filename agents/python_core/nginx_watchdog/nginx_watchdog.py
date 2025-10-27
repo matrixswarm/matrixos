@@ -34,6 +34,10 @@ class Agent(BootAgent, AgentSummaryMixin):
         self.alert_cooldown = cfg.get("alert_cooldown", 300)
         self.alert_role = cfg.get("alert_to_role", None)
         self.report_role = cfg.get("report_to_role", None)
+
+        self._last_run_log = 0
+        self._warned_not_installed = False
+
         self.last_recovery_alert = 0
         self.stats = {
             "date": self.today(),
@@ -253,78 +257,83 @@ class Agent(BootAgent, AgentSummaryMixin):
 
     def worker(self, config: dict = None, identity: IdentityObject = None):
         """
-        Main loop for the Nginx watchdog. Mirrors MySQL watchdog behavior:
-        - Emits a beacon
-        - Checks systemd enabled + active status + port binding
-        - Alerts if nginx is down at startup
-        - Handles state changes with alerts, reports, restarts
-        - Logs stability when unchanged
+        Streamlined Nginx watchdog:
+        - Logs once if Nginx isn’t installed or systemd-disabled
+        - Sends alerts only when a real state change occurs
+        - Heartbeat log every 5 minutes while healthy
         """
         try:
             self._emit_beacon()
             self.maybe_roll_day("nginx")
 
-            enabled = self.is_service_enabled()
-            is_healthy = self.is_nginx_running() and self.are_ports_open()
-
-            # If systemd disabled, hold fire until it's enabled
-            if not enabled:
-                self.log(f"[WATCHDOG] ⚠️ {self.service_name} is DISABLED in systemd. Waiting for it to be enabled...")
-                self.stats["last_state"] = False
+            # --- One-time "not installed" guard ---
+            installed = (
+                    os.path.exists("/usr/sbin/nginx")
+                    or os.path.exists("/usr/bin/nginx")
+                    or subprocess.call(["which", "nginx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+            )
+            if not installed:
+                if not self._warned_not_installed:
+                    self.log("[WATCHDOG] Nginx not installed — watchdog idle until installed.")
+                    self._warned_not_installed = True
                 interruptible_sleep(self, self.interval)
                 return
 
-            # First run: establish baseline + alert if already down
+            enabled = self.is_service_enabled()
+            if not enabled:
+                if not getattr(self, "_warned_disabled", False):
+                    self.log(f"[WATCHDOG] ⚠️ {self.service_name} is DISABLED in systemd. Waiting for enablement...")
+                    self._warned_disabled = True
+                interruptible_sleep(self, self.interval)
+                return
+            else:
+                self._warned_disabled = False
+
+            is_healthy = self.is_nginx_running() and self.are_ports_open()
+
+            # --- First run baseline ---
             if self.stats["last_state"] is None:
                 self.log(
                     f"[WATCHDOG] First run — {self.service_name} initial state is {'UP' if is_healthy else 'DOWN'}")
                 self.stats["last_state"] = is_healthy
                 self.stats["last_change"] = time.time()
-                if not is_healthy:
-                    diagnostics = self.collect_nginx_diagnostics()
-                    if self.should_alert("nginx-down"):
-                        self.send_simple_alert(f"❌ {self.service_name.capitalize()} is DOWN at startup.")
-                    self.send_data_report(
-                        status="DOWN", severity="CRITICAL",
-                        details=f"Service {self.service_name} not running or required ports closed (startup baseline).",
-                        metrics=diagnostics
-                    )
                 return
 
-            # Compare with last known state
             last_state_was_healthy = self.stats["last_state"]
 
             if is_healthy != last_state_was_healthy:
-                # State change
+                # --- State change detected ---
                 self.update_status_metrics(is_healthy)
-
                 if is_healthy:
                     now = time.time()
-                    if now - self.last_recovery_alert > 60:  # cooldown window
+                    if now - self.last_recovery_alert > 60:
                         self.log(f"[WATCHDOG] ✅ {self.service_name} has recovered.")
                         self.send_simple_alert(f"✅ {self.service_name.capitalize()} has recovered and is now online.")
                         self.send_data_report("RECOVERED", "INFO", "Service is back online and ports are open.")
                         self.last_recovery_alert = now
                 else:
-                    # Service just failed
                     self.log(f"[WATCHDOG] ❌ {self.service_name} is NOT healthy.")
                     diagnostics = self.collect_nginx_diagnostics()
                     if self.should_alert("nginx-down"):
                         self.send_simple_alert(f"❌ {self.service_name.capitalize()} is DOWN. Attempting restart...")
                     self.send_data_report(
-                        status="DOWN", severity="CRITICAL",
-                        details=f"Service {self.service_name} is not running or required ports are not open.",
-                        metrics=diagnostics
+                        status="DOWN",
+                        severity="CRITICAL",
+                        details=f"Service {self.service_name} is not running or ports are not open.",
+                        metrics=diagnostics,
                     )
                     self.restart_nginx()
 
                 self.stats["last_state"] = is_healthy
 
             else:
-                # State unchanged
+                # --- State unchanged ---
                 self.update_status_metrics(is_healthy)
                 if is_healthy:
-                    self.log(f"[WATCHDOG] ✅ {self.service_name} status is stable.")
+                    now = time.time()
+                    if self._last_run_log + 300 < now:  # every 5 min
+                        self.log(f"[WATCHDOG] ✅ {self.service_name} status is stable.")
+                        self._last_run_log = now
                 else:
                     self.log(f"[WATCHDOG] ❌ {self.service_name} is still NOT healthy.")
 

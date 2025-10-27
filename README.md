@@ -3,7 +3,8 @@
 
 MatrixOS is the **multi-language swarm runtime** of the MatrixSwarm ecosystem.  
 Agents run side-by-side — not under you — operating through file-based communication.
-
+#### Python ≥ 3.10 is required
+#### MatrixOS https://github.com/matrixswarm/phoenix required if connecting externally
 - Written in Python with Go and Rust agents in development.  
 - Encrypted, resurrectable, and fully decentralized.  
 - Every agent is signed, sandboxed, and resurrected if killed.  
@@ -283,11 +284,7 @@ Free for personal, research, and non-commercial use.
 For commercial use, contact: swarm@matrixswarm.com
 
 ### Authorship
-MatrixOS wasn’t auto-generated.
-It was co-created by Daniel F. MacDonald (vision, design, code) and ChatGPT (The General) (iteration, drafting, lore).
-
-Every agent, directive, and heartbeat came from collaboration.
-
+MatrixSwarm / Phoenix Cockpit © 2025 Daniel F. MacDonald & Contributors.
 ### Resources
 GitHub: github.com/matrixswarm/matrixswarm
 

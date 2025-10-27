@@ -73,7 +73,7 @@ class PhoenixCallbackDispatcher:
         self.agent = agent
         self.ctx = None
 
-    def dispatch(self, uid: str, ctx: CallbackCtx = None, content: dict = None):
+    def dispatch(self, ctx: CallbackCtx = None, content: dict = None):
         """
         Dispatch a secure callback with validated context.
         """
@@ -111,6 +111,8 @@ class PhoenixCallbackDispatcher:
 
             # === 3. Encrypt + Sign ===
             payload = {"handler": handler, "content": content}
+
+
             sealed = encrypt_with_ephemeral_aes(payload, remote_pub_pem)
             wrapper = {
                 "serial": serial,
@@ -132,8 +134,7 @@ class PhoenixCallbackDispatcher:
             for ep in endpoints:
                 pk.set_payload_item("handler", ep.get_handler())
                 self.agent.pass_packet(pk, ep.get_universal_id())
-
-            self.agent.log(f"[CALLBACK] ✅ Callback dispatched to {rpc_role} (uid={uid})")
+                self.agent.log(f"[CALLBACK] ✅ Callback dispatched to {ep.get_handler()} (uid={ep.get_universal_id()})")
 
         except Exception as e:
             self.agent.log(f"[CALLBACK][ERROR] Dispatch failed: {e}")

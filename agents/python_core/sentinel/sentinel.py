@@ -66,7 +66,7 @@ class Agent(BootAgent):
         """A lifecycle hook that runs before the main worker loop begins."""
         self.log("[SENTINEL] Sentinel activated. Awaiting signal loss...")
 
-    def worker(self, config=None, identity=None):
+    def worker(self, config:dict=None, identity=None):
         """
         Keep Sentinel responsive and allow graceful shutdown.
         """

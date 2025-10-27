@@ -24,10 +24,14 @@ class Agent(BootAgent, AgentSummaryMixin):
         self.redis_port = cfg.get("redis_port", 6379)
         self.socket_path = cfg.get("socket_path", "/var/run/redis/redis-server.sock")
         self.restart_limit = cfg.get("restart_limit", 3)
-        self.always_alert = bool(cfg.get("always_alert", 1))
+        self.always_alert = bool(cfg.get("always_alert", 0))
         self.alert_role = cfg.get("alert_to_role", None)
         self.report_role = cfg.get("report_to_role", None)  # Optional
         self.failed_restarts = 0
+
+        self._last_run_log = 0
+        self._warned_not_installed = False
+
         self.disabled = False
         self.alerts = {}
         self.alert_cooldown = 600
@@ -221,6 +225,13 @@ class Agent(BootAgent, AgentSummaryMixin):
             self._emit_beacon()
             self.maybe_roll_day('redis')
             running = self.is_redis_running()
+            installed = os.path.exists("/usr/bin/redis-server") or os.path.exists("/usr/sbin/redis-server")
+            if not installed:
+                if not self._warned_not_installed:
+                    self.log("[HAMMER] Redis not installed — watchdog idle until installed.")
+                    self._warned_not_installed = True
+                interruptible_sleep(self, self.interval)
+                return
             accessible = self.is_port_open() or self.is_socket_up()
             last_state = self.stats["last_state"]  # snapshot before update
             self.update_stats(running)
@@ -233,7 +244,10 @@ class Agent(BootAgent, AgentSummaryMixin):
 
                 if not accessible:
                     self.alert_operator("⚠️ Redis is active but unreachable via port or socket.")
-                self.log("[HAMMER] ✅ Redis is running.")
+                now = time.time()
+                if self._last_run_log  + 600 < now:  # 300 s = 5 min
+                    self.log("[HAMMER] ✅ Redis is running.")
+                    self._last_run_log = now
 
             else:
                 diagnostics = self.collect_redis_diagnostics()

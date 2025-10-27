@@ -43,6 +43,10 @@ class Agent(BootAgent, AgentSummaryMixin):
                 "last_state": None,
                 "last_change": time.time()
             }
+
+            self._last_run_log = 0
+            self._warned_not_installed = False
+
             self._emit_beacon = self.check_for_thread_poke("worker", timeout=90, emit_to_file_interval=10)
 
         except Exception as e:
@@ -260,66 +264,66 @@ class Agent(BootAgent, AgentSummaryMixin):
         return info
 
     def worker(self, config: dict = None, identity: IdentityObject = None):
-
-
         try:
-
             self._emit_beacon()
-            # This mixin method will reset stats daily, making the check below essential.
             self.maybe_roll_day("apache")
+
+            # --- One-time "not installed" guard ---
+            installed = (
+                    shutil.which("apache2")
+                    or shutil.which("httpd")
+                    or os.path.exists("/usr/sbin/httpd")
+                    or os.path.exists("/usr/sbin/apache2")
+            )
+            if not installed:
+                if not self._warned_not_installed:
+                    self.log("[WATCHDOG] Apache not installed — watchdog idle until installed.")
+                    self._warned_not_installed = True
+                interruptible_sleep(self, self.interval)
+                return
+
             is_healthy = self.is_apache_running() and self.are_ports_open()
 
-            # On the first run of the day, last_state is None. Establish a baseline.
             if self.stats["last_state"] is None:
                 self.log("[WATCHDOG] First run of the day. Establishing baseline status...")
                 self.stats["last_state"] = is_healthy
                 self.stats["last_change"] = time.time()
-                # We return here to avoid sending any alerts on the first check.
+                return  # skip alerts on first check
+
+            last_state_was_healthy = self.stats["last_state"]
+
+            if is_healthy != last_state_was_healthy:
+                self.update_stats(is_healthy)
+
+                if is_healthy:
+                    self.log("[WATCHDOG] ✅ Service has recovered.")
+                    if self.alert_role and self.should_alert("apache-recovered"):
+                        self.send_simple_alert("✅ Apache has recovered and is now online.")
+                    if self.report_role:
+                        self.send_data_report("RECOVERED", "INFO", "Service is back online and ports are open.")
+                else:
+                    self.log("[WATCHDOG] ❌ Apache is NOT healthy.")
+                    diagnostics = self.collect_apache_diagnostics()
+                    if self.alert_role and self.should_alert("apache-down"):
+                        self.send_simple_alert("❌ Apache is DOWN or not binding required ports. Attempting restart...")
+                    if self.report_role:
+                        self.send_data_report(
+                            status="DOWN",
+                            severity="CRITICAL",
+                            details="Service is not running or ports are not binding.",
+                            metrics=diagnostics
+                        )
+                    self.restart_apache()
 
             else:
-
-                last_state_was_healthy = self.stats["last_state"]
-
-                # Only take action if the service state has actually changed.
-                if is_healthy != last_state_was_healthy:
-
-                    self.update_stats(is_healthy)
-
-                    # Case 1: Service just recovered (it was down, now it's up)
-                    if is_healthy:
-                        self.log("[WATCHDOG] ✅ Service has recovered.")
-                        if self.alert_role:
-                            self.send_simple_alert("✅ Apache has recovered and is now online.")
-                        if self.report_role:
-                            self.send_data_report("RECOVERED", "INFO", "Service is back online and ports are open.")
-
-                    # Case 2: Service just went down (it was up, now it's down)
-                    else:
-                        self.log("[WATCHDOG] ❌ Apache is NOT healthy.")
-
-                        # --- MODIFICATION START ---
-                        # Collect diagnostics at the moment of failure.
-                        diagnostics = self.collect_apache_diagnostics()
-
-                        if self.alert_role and self.should_alert("apache-down"):
-                            self.send_simple_alert("❌ Apache is DOWN or not binding required ports. Attempting restart...")
-
-                        if self.report_role:
-                            self.send_data_report(
-                                status="DOWN",
-                                severity="CRITICAL",
-                                details="Service is not running or ports are not binding.",
-                                metrics=diagnostics
-                            )
-
-                        self.restart_apache()
-
-                # Case 3: Service state is unchanged
-                else:
-                    if is_healthy:
+                # State unchanged
+                if is_healthy:
+                    now = time.time()
+                    if self._last_run_log + 600 < now:  # every 5 min
                         self.log("[WATCHDOG] ✅ Apache status is stable.")
-                    else:
-                        self.log("[WATCHDOG] ❌ Apache is still NOT healthy.")
+                        self._last_run_log = now
+                else:
+                    self.log("[WATCHDOG] ❌ Apache is still NOT healthy.")
 
         except Exception as e:
             self.log(error=e, block="main_try")

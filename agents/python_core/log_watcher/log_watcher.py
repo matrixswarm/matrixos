@@ -1,156 +1,414 @@
-# Authored by Daniel F MacDonald and Gemini
-import os
-import sys
+# Authored by Daniel F MacDonald and ChatGPT-5 aka The Generals
+# ChatGPT-3 Docstrings
+import os, sys, time, json, uuid, importlib, threading
+from Crypto.PublicKey import RSA
 
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 
-import time
 from core.python_core.boot_agent import BootAgent
 from core.python_core.utils.swarm_sleep import interruptible_sleep
+from core.python_core.class_lib.gui.callback_dispatcher import PhoenixCallbackDispatcher, CallbackCtx
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
+from core.python_core.utils.crypto_utils import pem_fix
+
 
 class Agent(BootAgent):
-    """
-    A robust agent that tails a log file, parses new entries, and sends
-    them as status reports to the swarm for real-time analysis.
-    """
 
     def __init__(self):
-        """Initializes the agent and its log watching configuration."""
         super().__init__()
-        self.AGENT_VERSION = "1.0.0"
 
-        config = self.tree_node.get("config", {})
 
-        self.log_path = config.get("log_path")
-        self.service_name = config.get("service_name", "generic.log")
-        self.report_to_role = config.get("report_to_role", "hive.forensics.data_feed")
+        try:
+            cfg = self.tree_node.get("config", {})
 
-        # Rules for classifying log severity based on keywords
-        self.severity_rules = config.get("severity_rules", {
-            "CRITICAL": ["fatal", "critical", "segfault", "segmentation fault"],
-            "WARNING": ["error", "warn", "warning", "denied", "failed"],
-            "INFO": []  # Default
-        })
-        self.interval = 10
-        # State tracking for log rotation
-        self._current_inode = None
-        self._log_file = None
-        self._emit_beacon = self.check_for_thread_poke("worker", timeout=self.interval*2, emit_to_file_interval=10)
+            self.AGENT_VERSION = "2.0.0"
+            self._interval = cfg.get("check_interval_sec", 30)
+            self._patrol_interval = cfg.get("patrol_interval_hours", 6) * 3600
+            self._last_patrol = 0
+            self.enable_oracle = bool(cfg.get("enable_oracle", 0))
+            self.oracle_role = cfg.get("oracle_role", "hive.oracle")
+            self.alert_role = cfg.get("alert_role", "hive.alert")
+            self._last_alert=0
+            self._alert_cooldown=0
 
+            self.oracle_timeout = int(cfg.get("oracle_timeout", 120))
+            self.collectors = cfg.get("collectors", ["httpd", "sshd"])
+            self._rpc_role = self.tree_node.get("rpc_router_role", "hive.rpc")
+
+            self.oracle_stack = {}
+
+            # encryption
+            self._signing_keys = self.tree_node.get('config', {}).get('security', {}).get('signing', {})
+            self._has_signing_keys = bool(self._signing_keys.get('privkey')) and bool(self._signing_keys.get('remote_pubkey'))
+
+            if self._has_signing_keys:
+                priv_pem = self._signing_keys.get("privkey")
+                priv_pem = pem_fix(priv_pem)
+                self._signing_key_obj = RSA.import_key(priv_pem.encode() if isinstance(priv_pem, str) else priv_pem)
+
+            self._serial_num = self.tree_node.get('serial', {})
+
+            self._emit_beacon = self.check_for_thread_poke("worker", timeout=self._interval * 2, emit_to_file_interval=10)
+
+        except Exception as e:
+            self.log(error=e, block="main_try")
+
+    # ------------------------------------------------------------------
     def post_boot(self):
-        self.log(f"{self.NAME} v{self.AGENT_VERSION} – your logs tell many secrets...")
+        self.log(f"{self.NAME} v{self.AGENT_VERSION} — Oracle-aware patrol online.")
 
-    def worker_pre(self):
-        self.log(f"Beginning to watch log file: {self.log_path}")
-        self._open_log_file()
-
-
-    def worker(self, config: dict = None, identity: IdentityObject = None):
+    def worker(self, config=None, identity:IdentityObject=None):
         """
-        Main worker loop that tails the log file and handles rotation.
+        Main scheduled loop.
+
+        Performs one *digest patrol* every ``self._interval`` seconds:
+        • Emits a beacon so Phoenix’s liveness watchdog doesn’t mark it stale
+        • Flushes expired Oracle requests from ``self.oracle_stack``
+        • Triggers :pymeth:`_run_digest_cycle` if the patrol timer has elapsed.
+
+        Notes
+        -----
+        Runs inside the MatrixSwarm thread harness; any uncaught exception is
+        logged and the loop sleeps briefly before continuing.
         """
         try:
             self._emit_beacon()
-            if not self.log_path or not os.path.exists(self.log_path):
-                self.log(f"Log path '{self.log_path}' is invalid or not found. Worker will idle.", level="ERROR")
+            now = time.time()
+            self._check_oracle_timeouts()
+            self.oracle_stack = {k: v for k, v in self.oracle_stack.items()
+                                 if now - v["timestamp"] < self.oracle_timeout}
 
-            else:
-
-                try:
-                    # Check for log rotation
-                    if not self._is_file_still_valid():
-                        self.log("Log rotation detected. Re-opening file handle.", level="INFO")
-                        self._open_log_file()
-
-                    # Read new lines
-                    line = self._log_file.readline()
-                    if line:
-                        self._process_line(line)
-
-                except Exception as e:
-                    self.log("Error during log watch cycle.", error=e, level="ERROR")
-
-
+            if self.enable_oracle and (now - self._last_patrol) >= self._patrol_interval:
+                self._last_patrol = now
+                self._run_digest_cycle(use_oracle=True, patrol=True)
         except Exception as e:
-            self.log(error=e, block="main_try")
+            self.log(error=e, block="main_try", level="ERROR")
 
-        interruptible_sleep(self, self.interval)
+        interruptible_sleep(self, self._interval)
 
+    # ------------------------------------------------------------------
+    def run_collectors(self):
 
-    def _open_log_file(self):
-        """Opens or re-opens the log file and seeks to the end."""
+        results = {}
+        for name in self.collectors:
+            try:
+                mod = importlib.import_module(f"log_watcher.factory.collectors.{name}")
+                results[name] = mod.collect()
+            except Exception as e:
+                self.log(f"[COLLECTOR][ERROR] {name}: {e}", level="ERROR")
+        return results
+
+    # ------------------------------------------------------------------
+    def cmd_generate_system_log_digest(self, content, packet, identity=None):
         try:
-            if self._log_file:
-                self._log_file.close()
+            requested_collectors = content.get("collectors")
+            if requested_collectors:
+                self.collectors = requested_collectors
 
-            self._log_file = open(self.log_path, 'r')
-            self._current_inode = os.fstat(self._log_file.fileno()).st_ino
-            self._log_file.seek(0, 2)  # Go to the end of the file
+            use_oracle = bool(content.get("use_oracle", False))
+            session_id = content.get("session_id")
+            return_handler = content.get("return_handler")
+            include_details = bool(content.get("include_details", True))
 
-        except Exception as e:
-            self.log(error=e, block="main_try")
+            # ⚙ preserve GUI token across whole path
+            query_id = f"log_digest_{int(time.time())}"
+            token = content.get("token", query_id)
 
+            summary = self.run_collectors()
+            formatted = self._render_digest(summary, use_full_format=include_details)
 
-    def _is_file_still_valid(self):
-        """Checks if the log file has been rotated."""
-        try:
-            return os.stat(self.log_path).st_ino == self._current_inode
-        except FileNotFoundError:
-            return False
+            # immediate digest to GUI, tagged with same token
+            self._broadcast_output(
+                token=token,
+                session_id=session_id,
+                offset=0,
+                lines=formatted.splitlines(),
+                return_handler=return_handler,
+            )
 
-    def _process_line(self, line: str):
-        """Parses a log line and sends it as a status report."""
-
-        try:
-            line = line.strip()
-            if not line:
+            if not use_oracle:
                 return
 
-            severity = "INFO"  # Default severity
-            line_lower = line.lower()
-            for level, keywords in self.severity_rules.items():
-                if any(keyword in line_lower for keyword in keywords):
-                    severity = level
-                    break
-
-            report = {
-                "source_agent": self.command_line_args.get("universal_id"),
-                "service_name": self.service_name,
-                "status": "log_entry_detected",
-                "severity": severity,
-                "details": {
-                    "timestamp": time.time(),
-                    "log_line": line
-                }
+            # store oracle job with same token
+            self.oracle_stack[query_id] = {
+                "timestamp": time.time(),
+                "payload": summary,
+                "session_id": session_id,
+                "return_handler": return_handler,
+                "token": token,
             }
-            self._send_report(report)
-        except Exception as e:
-            self.log(error=e, block="main_try")
 
-    def _send_report(self, report_content: dict):
-        """Constructs and sends a status report packet."""
+            self._send_to_oracle(summary, query_id)
+            threading.Thread(
+                target=self._oracle_timeout_watchdog,
+                args=(query_id, self.oracle_timeout),
+                daemon=True,
+            ).start()
+
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+
+
+    def _oracle_timeout_watchdog(self, query_id, timeout):
+
         try:
-            report_nodes = self.get_nodes_by_role(self.report_to_role)
-            if not report_nodes:
+            start = time.time()
+            while time.time() - start < timeout:
+                time.sleep(2)
+                if query_id not in self.oracle_stack:
+                    return  # Oracle responded in time
+
+            entry = self.oracle_stack.pop(query_id, None)
+            if not entry:
                 return
 
+            lines = [
+                "⚠ Oracle timeout — no response received in time.",
+                "Returning base digest without analysis.",
+            ]
+
+            self._broadcast_output(
+                token=entry["token"],
+                session_id=entry["session_id"],
+                offset=0,
+                lines=lines,
+                return_handler=entry["return_handler"],
+            )
+
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+
+    def _run_digest_cycle(self, use_oracle=False, session_id=None, return_handler=None, patrol=False):
+        """Runs collector cycle manually or during patrol, with optional Oracle analysis."""
+
+        try:
+            include_details = True  # default verbosity
+            token = f"patrol_{uuid.uuid4().hex[:8]}" if patrol else f"manual_{uuid.uuid4().hex[:8]}"
+
+            summary = self.run_collectors()
+            formatted = self._render_digest(summary, use_full_format=include_details)
+
+            # Only broadcast to cockpit when it's an interactive (manual) run
+            if not patrol and session_id:
+                self._broadcast_output(
+                    token=token,
+                    session_id=session_id,
+                    offset=0,
+                    lines=formatted.splitlines(),
+                    return_handler=return_handler,
+                )
+
+            if not use_oracle:
+                return
+
+            # prevent stacking duplicate patrol queries
+            if patrol and len(self.oracle_stack) > 3:
+                self.log("[LOGWATCH] Throttling patrol Oracle submissions.")
+                # trim oldest entries
+                oldest = sorted(self.oracle_stack.keys())[:-2]
+                for oid in oldest:
+                    self.oracle_stack.pop(oid, None)
+                return
+
+            # avoid duplicate summaries
+            if any(v.get("payload") == summary for v in self.oracle_stack.values()):
+                self.log("[LOGWATCH] Identical digest already pending; skipping.")
+                return
+
+            query_id = f"log_digest_{int(time.time())}"
+            self.oracle_stack[query_id] = {
+                "timestamp": time.time(),
+                "payload": summary,
+                "session_id": session_id,
+                "return_handler": return_handler or "logwatch_panel.update",
+                "token": token,
+                "patrol": patrol,
+            }
+
+            # send job to Oracle
+            self._send_to_oracle(summary, query_id)
+
+            # spin watchdog for timeout
+            threading.Thread(
+                target=self._oracle_timeout_watchdog,
+                args=(query_id, self.oracle_timeout),
+                daemon=True,
+            ).start()
+
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+    def _render_digest(self, summary: dict, use_full_format: bool = True) -> str:
+        out = []
+        for name, section in summary.items():
+
+            try:
+                header = f"--------------------- {name.upper()} Begin ------------------------"
+                footer = f"---------------------- {name.upper()} End -------------------------"
+
+                out.append(header)
+                if not use_full_format:
+                    out.append(section.get("summary", "(no summary)"))
+                else:
+                    for key, values in section.items():
+                        if key == "summary":
+                            out.append(section["summary"])
+                            continue
+                        if isinstance(values, list):
+                            out.append(f"\n## {key.upper()} ##")
+                            out.extend(values)
+                out.append(footer)
+                out.append("")  # spacing
+
+            except Exception as e:
+                self.log(error=e, block="main_try", level="ERROR")
+
+        return "\n".join(out)
+
+    # ------------------------------------------------------------------
+    def _send_to_oracle(self, summary, query_id):
+
+        try:
+            endpoints = self.get_nodes_by_role(self.oracle_role, return_count=1)
+            if not endpoints:
+                self.log(f"[LOGWATCH] No Oracle agents found for role {self.oracle_role}.")
+                return
+
+            prompt = (
+                "Analyze the following system log digest for anomalies or potential issues.\n\n"
+                f"{json.dumps(summary, indent=2)}"
+            )
             pk = self.get_delivery_packet("standard.command.packet")
             pk.set_data({
-                "handler": "cmd_ingest_status_report",
-                "content": report_content
+                "handler": "cmd_msg_prompt",
+                "content": {
+                    "prompt": prompt,
+                    "query_id": query_id,
+                    "target_universal_id": self.command_line_args.get("universal_id"),
+                    "return_handler": "cmd_oracle_response",
+                },
             })
 
-            for node in report_nodes:
-                self.pass_packet(pk, node["universal_id"])
+            for ep in endpoints:
+                pk.set_payload_item("handler", ep.get_handler())
+                self.pass_packet(pk, ep.get_universal_id())
 
-            if self.debug.is_enabled():
-                self.log(f"Sent '{report_content['severity']}' log entry for '{self.service_name}'.")
+            self.log(f"[LOGWATCH] Digest sent to Oracle (query {query_id}).")
 
         except Exception as e:
-            self.log("Failed to send log report.", error=e, block="_send_report")
+            self.log(error=e, block="main_try", level="ERROR")
 
+
+    # ------------------------------------------------------------------
+    def cmd_oracle_response(self, content, packet, identity=None):
+        try:
+            query_id = content.get("query_id")
+            entry = self.oracle_stack.pop(query_id, None)
+            if not entry:
+                self.log(f"[ORACLE] Received unknown query_id: {query_id}")
+                return
+
+            token = entry["token"]
+            lines = [
+                "=== ORACLE ANALYSIS BEGIN ===",
+                content.get("response", "").strip(),
+                "=== ORACLE ANALYSIS END ===",
+            ]
+            self._broadcast_output(
+                token=token,
+                session_id=entry["session_id"],
+                offset=0,
+                lines=lines,
+                return_handler=entry["return_handler"],
+            )
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+    # ------------------------------------------------------------------
+    def _check_oracle_timeouts(self):
+        now = time.time()
+        expired = [qid for qid, v in self.oracle_stack.items() if now - v["timestamp"] > self.oracle_timeout]
+        try:
+            for qid in expired:
+                entry = self.oracle_stack.pop(qid)
+                msg = f"[LOGWATCH] Oracle timeout — no response for {qid}."
+                self._broadcast_output(
+                    token=entry.get("token", qid),
+                    session_id=entry.get("session_id"),
+                    offset=0,
+                    lines=[msg],
+                    return_handler="logwatch_panel.update",
+                )
+                self._send_alert(msg, qid)
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+
+    # ------------------------------------------------------------------
+    def _send_alert(self, message, incident_id):
+        """Push an alert if Oracle finds or times out on a concern."""
+
+        try:
+
+            if not message or not str(message).strip():
+                self.log(f"[LOGWATCH][ALERT] Empty message for incident {incident_id}, skipping.")
+                return
+            if time.time() - self._last_alert < self._alert_cooldown:
+                self.log("[LOGWATCH][ALERT] Cooldown active, skipping duplicate alert.")
+                return
+            self._last_alert = time.time()
+
+            endpoints = self.get_nodes_by_role(self.alert_role)
+            if not endpoints:
+                self.log("[LOGWATCH][ALERT] No alert agents found.")
+                return
+
+            pk = self.get_delivery_packet("notify.alert.general")
+            pk.set_data({
+                "msg": message,
+                "cause": "Oracle-Analyzed Digest",
+                "origin": self.command_line_args.get("universal_id"),
+            })
+            cmd = self.get_delivery_packet("standard.command.packet")
+            cmd.set_data({"handler": "cmd_send_alert_msg"})
+            cmd.set_packet(pk, "content")
+
+            for ep in endpoints:
+                cmd.set_payload_item("handler", ep.get_handler())
+                self.pass_packet(cmd, ep.get_universal_id())
+
+            self.log(f"[LOGWATCH][ALERT] Dispatched alert for {incident_id}.")
+
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+    # ------------------------------------------------------------------
+    def _broadcast_output(self, token, session_id, offset, lines, return_handler):
+        try:
+            ctx = (
+                CallbackCtx(agent=self)
+                .set_rpc_role(self._rpc_role)
+                .set_response_handler(return_handler)
+                .set_confirm_response(True)
+                .set_session_id(session_id)
+                .set_token(token)
+            )
+            payload = {
+                "session_id": session_id,
+                "token": token,
+                "start_line": offset,
+                "lines": lines,
+                "next_offset": offset + len(lines),
+                "timestamp": int(time.time()),
+            }
+
+            dispatcher = PhoenixCallbackDispatcher(self)
+            dispatcher.dispatch(ctx=ctx, content=payload)
+        except Exception as e:
+            self.log("[LOGWATCH][ERROR] broadcast_output failed", error=e)
 
 if __name__ == "__main__":
     agent = Agent()

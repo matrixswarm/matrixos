@@ -111,7 +111,7 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
                 priv_pem=pem_fix(priv_pem)
                 self._signing_key_obj = RSA.import_key(priv_pem.encode() if isinstance(priv_pem, str) else priv_pem)
 
-            self._serial_num= self.tree_node.get('serial', {})
+            self._serial_num= self.tree_node.get('serial')
 
             # delegate Matrix her Tree
             self.delegate_tree_to_agent("matrix", self.tree_path_dict)
@@ -224,7 +224,7 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
     def cmd_the_source(self, content, packet, identity:IdentityObject=None):
 
         """
-        Gate-kept entry-point for **every** command bound for the Matrix core, except for cmd_deliver_agent_tree_to_child used for agents to retreive their agent_trees.
+        Gate-kept entry-point for **every** command bound for the Matrix core, except for cmd_deliver_agent_tree_to_child used for agents to retrieve their agent_trees.
 
         Incoming packets arrive as an *outer* wrapper that contains an RSA-signed,
         AES-encrypted payload.
@@ -448,7 +448,7 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
                     }
 
                     dispatcher = PhoenixCallbackDispatcher(self)
-                    dispatcher.dispatch(uid, ctx, confirm_payload)
+                    dispatcher.dispatch(ctx, confirm_payload)
 
                     self.log(f"[DELETE][CALLBACK] Sent delete_complete for {uid}")
 
@@ -507,7 +507,7 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
                     }
 
                     dispatcher = PhoenixCallbackDispatcher(self)
-                    dispatcher.dispatch(uid, ctx, confirm_payload)
+                    dispatcher.dispatch(ctx, confirm_payload)
 
                 else:
                     self.log("[RESTART][CALLBACK] No callback data found for node.")

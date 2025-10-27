@@ -35,6 +35,10 @@ class Agent(BootAgent, AgentSummaryMixin):
         self.alert_role = cfg.get("alert_to_role", None)
         self.report_role = cfg.get("report_to_role", None)
         self.alert_cooldown = cfg.get("alert_cooldown", 300)
+
+        self._last_run_log = 0
+        self._warned_not_installed = False
+
         self.alert_thresholds = cfg.get("alert_thresholds", {"uptime_pct_min": 90, "slow_restart_sec": 10})
         self.service_name = cfg.get("service_name", "mysql")
         self.comm_targets = cfg.get("comm_targets", [])
@@ -173,72 +177,78 @@ class Agent(BootAgent, AgentSummaryMixin):
 
     def worker(self, config: dict = None, identity: IdentityObject = None):
         """
-        The main worker loop. It checks the health of the MySQL service, handles state
-        changes (e.g., failure, recovery), triggers restarts, and sends alerts/reports.
-
-        Args:
-            config (dict, optional): Configuration dictionary. Defaults to None.
-            identity (IdentityObject, optional): Identity object for the agent. Defaults to None.
+        Main MySQL watchdog loop — now quiet until MySQL exists, and logs only once
+        every five minutes while healthy.
         """
-        # Handle daily summary/report roll
         try:
-
-            # Health check
             self._emit_beacon()
             self.maybe_roll_day("mysql")
 
-            is_healthy = self.is_mysql_running() and self.is_mysql_listening()
+            # --- One-time "not installed" guard ---
+            installed = (
+                    shutil.which("mysqld")
+                    or shutil.which("mysql")
+                    or os.path.exists("/usr/sbin/mysqld")
+                    or os.path.exists("/usr/bin/mysqld")
+            )
+            if not installed:
+                if not self._warned_not_installed:
+                    self.log("[WATCHDOG] MySQL not installed — watchdog idle until installed.")
+                    self._warned_not_installed = True
+                interruptible_sleep(self, self.interval)
+                return
 
+            is_healthy = self.is_mysql_running() and self.is_mysql_listening()
 
             # First run: establish baseline
             if self.stats["last_state"] is None:
                 self.log("[WATCHDOG] First run of the day. Establishing baseline status...")
                 self.stats["last_state"] = is_healthy
                 self.stats["last_change"] = time.time()
-                # We return here to avoid sending any alerts on the first check.
+                return  # skip alerts on first pass
+
+            last_state_was_healthy = self.stats["last_state"]
+
+            if is_healthy != last_state_was_healthy:
+                self.update_stats(is_healthy)
+
+                if is_healthy:
+                    now = time.time()
+                    if now - self.last_recovery_alert > 60:
+                        self.log(f"[WATCHDOG] ✅ {self.service_name} has recovered.")
+                        self.send_simple_alert(
+                            f"✅ {self.service_name.capitalize()} has recovered and is now online."
+                        )
+                        self.last_recovery_alert = now
+                else:
+                    self.log(f"[WATCHDOG] ❌ {self.service_name} is NOT healthy.")
+                    diagnostics = self.collect_mysql_diagnostics()
+                    if self.should_alert("mysql-down"):
+                        self.send_simple_alert(
+                            f"❌ {self.service_name.capitalize()} is DOWN. Attempting restart..."
+                        )
+                    self.send_data_report(
+                        status="DOWN",
+                        severity="CRITICAL",
+                        details=f"Service {self.service_name} is not running or ports are not open.",
+                        metrics=diagnostics,
+                    )
+                    self.restart_mysql()
 
             else:
-
-                last_state_was_healthy = self.stats["last_state"]
-
-                # Only take action if the service state has actually changed.
-                if is_healthy != last_state_was_healthy:
-
-                    self.update_stats(is_healthy)
-
-                    if is_healthy:
-                        now = time.time()
-                        if now - self.last_recovery_alert > 60:  # grace window in seconds
-                            self.log(f"[WATCHDOG] ✅ {self.service_name} has recovered.")
-                            self.send_simple_alert(
-                                f"✅ {self.service_name.capitalize()} has recovered and is now online.")
-                            self.last_recovery_alert = now
-
-                    else:
-                        # Service just failed
-                        self.log(f"[WATCHDOG] ❌ {self.service_name} is NOT healthy.")
-                        diagnostics = self.collect_mysql_diagnostics()
-                        if self.should_alert("mysql-down"):
-                            self.send_simple_alert(f"❌ {self.service_name.capitalize()} is DOWN. Attempting restart...")
-                        self.send_data_report(
-                            status="DOWN", severity="CRITICAL",
-                            details=f"Service {self.service_name} is not running or ports are not open.",
-                            metrics=diagnostics
-                        )
-                        self.restart_mysql()
-
-                # Case 3: Service state is unchanged
-                else:
-                    if is_healthy:
+                # State unchanged
+                if is_healthy:
+                    now = time.time()
+                    if self._last_run_log + 600 < now:  # every 5 minutes
                         self.log(f"[WATCHDOG] ✅ {self.service_name} status is stable.")
-                    else:
-                        self.log(f"[WATCHDOG] ❌ {self.service_name} is still NOT healthy.")
+                        self._last_run_log = now
+                else:
+                    self.log(f"[WATCHDOG] ❌ {self.service_name} is still NOT healthy.")
 
         except Exception as e:
             self.log(error=e, block="main_try", level="ERROR")
 
         interruptible_sleep(self, self.interval)
-
 
     def should_alert(self, key):
         """

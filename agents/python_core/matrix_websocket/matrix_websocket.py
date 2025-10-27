@@ -170,6 +170,9 @@ class Agent(BootAgent):
             peer_pub_pem = signing_cfg.get("remote_pubkey")
             self.peer_pub_key = RSA.import_key(peer_pub_pem.encode()) if peer_pub_pem else None
             ws_priv_pem = signing_cfg.get("privkey")
+
+            self._serial_num = self.tree_node.get('serial')
+
             try:
                 self.ws_priv = RSA.import_key(ws_priv_pem.encode()) if ws_priv_pem else None
                 if self.ws_priv:
@@ -615,7 +618,7 @@ class Agent(BootAgent):
                 if session_id:
                     self.log(f"[WS][ROUTER][DISPOSED] Session '{session_id}' not found — disposing: Sender: {sender}")
                 else:
-                    self.log("[WS][ROUTER] No session_id — broadcasting to all.")
+                    self.log(f"[WS][ROUTER] No session_id — broadcasting to all: Sender: {sender}.")
                     self.cmd_broadcast(content, content)
 
         except Exception as e:

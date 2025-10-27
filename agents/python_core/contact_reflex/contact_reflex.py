@@ -416,7 +416,7 @@ class Agent(BootAgent):
             })
 
             # Send to the first agent serving as hive.oracle
-            for node in self.get_nodes_by_role("hive.oracle","any",1):
+            for node in self.get_nodes_by_role("hive.oracle",return_count=1):
                 self.pass_packet(pk_command, node["universal_id"])
 
             # Mark as sent
