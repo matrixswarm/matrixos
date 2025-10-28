@@ -102,6 +102,11 @@ class Agent(BootAgent):
 
         except Exception as e:
             self.log(error=e, block="log_reader_loader", level="ERROR")
+            return {}
+
+        # Normalize collector selection list
+        if limit_to:
+            limit_to = [c.strip().lower() for c in limit_to]
 
         for name, cfg in collectors_cfg.items():
 
