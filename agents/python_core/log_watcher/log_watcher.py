@@ -29,10 +29,12 @@ class Agent(BootAgent):
             self.enable_oracle = bool(cfg.get("enable_oracle", 0))
             self.oracle_role = cfg.get("oracle_role", "hive.oracle")
             self.alert_role = cfg.get("alert_role", "hive.alert")
+
             self._last_alert=0
             self._alert_cooldown=0
 
             self.oracle_timeout = int(cfg.get("oracle_timeout", 120))
+            self._active_collectors = []
             self.collectors = cfg.get("collectors", ["httpd", "sshd"])
             self._rpc_role = self.tree_node.get("rpc_router_role", "hive.rpc")
 
@@ -87,24 +89,45 @@ class Agent(BootAgent):
 
         interruptible_sleep(self, self._interval)
 
-    # ------------------------------------------------------------------
-    def run_collectors(self):
 
-        results = {}
-        for name in self.collectors:
+
+    # ------------------------------------------------------------------
+    def run_collectors(self, limit_to=None):
+
+        collector_results = {}
+        collectors_cfg = self.tree_node.get("config", {}).get("collectors", {})
+
+        try:
+            loader = importlib.import_module(f"log_watcher.factory.utility.log_reader")
+
+        except Exception as e:
+            self.log(error=e, block="log_reader_loader", level="ERROR")
+
+        for name, cfg in collectors_cfg.items():
+
             try:
-                mod = importlib.import_module(f"log_watcher.factory.collectors.{name}")
-                results[name] = mod.collect()
+                key = name.strip().lower()
+                if limit_to and key not in limit_to:
+                    continue
+
+                try:
+                    result = loader.collect_log(self.log, cfg or {})
+                    collector_results[name] = result if isinstance(result, dict) else {"lines": result}
+                    self.log(f"[COLLECTOR] ✅ {name} parsed {len(collector_results[name].get('lines', []))} lines.")
+                except ModuleNotFoundError:
+                    self.log(f"[COLLECTOR] ❌ {name} not found")
+                except Exception as e:
+                    self.log(f"[COLLECTOR] ❌ {name} failed: {e}", error=e)
+
             except Exception as e:
-                self.log(f"[COLLECTOR][ERROR] {name}: {e}", level="ERROR")
-        return results
+                self.log(error=e, block="main_try", level="ERROR")
+
+        return collector_results
 
     # ------------------------------------------------------------------
     def cmd_generate_system_log_digest(self, content, packet, identity=None):
         try:
-            requested_collectors = content.get("collectors")
-            if requested_collectors:
-                self.collectors = requested_collectors
+            limit_to = content.get("collectors")
 
             use_oracle = bool(content.get("use_oracle", False))
             session_id = content.get("session_id")
@@ -115,7 +138,7 @@ class Agent(BootAgent):
             query_id = f"log_digest_{int(time.time())}"
             token = content.get("token", query_id)
 
-            summary = self.run_collectors()
+            summary = self.run_collectors(limit_to=limit_to)
             formatted = self._render_digest(summary, use_full_format=include_details)
 
             # immediate digest to GUI, tagged with same token
@@ -241,32 +264,46 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(error=e, block="main_try", level="ERROR")
 
-    def _render_digest(self, summary: dict, use_full_format: bool = True) -> str:
-        out = []
-        for name, section in summary.items():
+    def _render_digest(self, collector_results, use_full_format=True):
+        """
+        Converts collector_results into a unified digest string or structured payload.
+        Compatible with legacy 'use_full_format' flag.
+        """
+        try:
+            digest_lines = []
+            for name, section in collector_results.items():
+                digest_lines.append(f"--------------------- {name.upper()} Begin ------------------------")
 
-            try:
-                header = f"--------------------- {name.upper()} Begin ------------------------"
-                footer = f"---------------------- {name.upper()} End -------------------------"
+                # 🛡 Guard malformed data
+                if not isinstance(section, dict):
+                    self.log(
+                        f"[DIGEST] ⚠️ Skipping malformed collector '{name}' (expected dict, got {type(section).__name__})")
+                    continue
 
-                out.append(header)
-                if not use_full_format:
-                    out.append(section.get("summary", "(no summary)"))
-                else:
-                    for key, values in section.items():
-                        if key == "summary":
-                            out.append(section["summary"])
-                            continue
-                        if isinstance(values, list):
-                            out.append(f"\n## {key.upper()} ##")
-                            out.extend(values)
-                out.append(footer)
-                out.append("")  # spacing
+                lines = section.get("lines", [])
+                summary = section.get("summary")
+                stats = section.get("stats", {})
 
-            except Exception as e:
-                self.log(error=e, block="main_try", level="ERROR")
+                # 🔍 Basic or detailed digest
+                if use_full_format:
+                    if isinstance(lines, list):
+                        digest_lines.extend(lines)
+                    else:
+                        digest_lines.append(str(lines))
 
-        return "\n".join(out)
+                # 🧮 Summary & stats (always included)
+                if summary:
+                    digest_lines.append(f"\n## SUMMARY ##\n{summary}")
+                if stats:
+                    digest_lines.append(f"\n## STATS ##\n{json.dumps(stats, indent=2)}")
+
+                digest_lines.append(f"---------------------- {name.upper()} End -------------------------\n")
+
+            return "\n".join(digest_lines)
+
+        except Exception as e:
+            self.log("[DIGEST][ERROR] Failed to render digest", error=e)
+            return f"[DIGEST][ERROR] {e}"
 
     # ------------------------------------------------------------------
     def _send_to_oracle(self, summary, query_id):

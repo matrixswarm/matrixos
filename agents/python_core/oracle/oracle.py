@@ -103,6 +103,20 @@ class Agent(BootAgent):
                 self.log("[ORACLE][ERROR] target_universal_id. Cannot respond.")
                 return
 
+            if len(prompt_text) > 30000:  # ~10–12 k tokens safety zone
+                import re, json
+                try:
+                    # keep only section headers and summaries
+                    keep = []
+                    for line in prompt_text.splitlines():
+                        if line.startswith("## SUMMARY") or line.startswith("## STATS") \
+                                or "Begin" in line or "End" in line:
+                            keep.append(line)
+                    prompt_text = "\n".join(keep)
+                    self.log(f"[ORACLE] Trimmed digest to {len(prompt_text)} chars before send.")
+                except Exception as e:
+                    self.log(f"[ORACLE][WARN] Failed to trim digest: {e}")
+
             self.log(f"[ORACLE] Response mode: {response_mode}")
 
             messages = history + [{"role": "user", "content": prompt_text}]
