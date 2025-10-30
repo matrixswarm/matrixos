@@ -2,6 +2,7 @@
 # Gemini, code enhancements and Docstrings
 import sys
 import os
+import re, json
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 import time
@@ -104,7 +105,7 @@ class Agent(BootAgent):
                 return
 
             if len(prompt_text) > 30000:  # ~10–12 k tokens safety zone
-                import re, json
+
                 try:
                     # keep only section headers and summaries
                     keep = []

@@ -12,14 +12,12 @@ import threading
 import asyncio
 import websockets
 import json
-import base64
+import uuid
 from Crypto.PublicKey import RSA
-from Crypto.Signature import pkcs1_15
-from Crypto.Hash import SHA256
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 from core.python_core.utils.swarm_trustkit import extract_spki_pin_from_cert
 from core.python_core.boot_agent import BootAgent
-from core.python_core.utils.crypto_utils import pem_fix
+from core.python_core.utils.crypto_utils import encrypt_with_ephemeral_aes,  sign_data, pem_fix
 from core.python_core.utils.cert_loader import load_cert_chain_from_memory
 from core.python_core.utils.swarm_sleep import interruptible_sleep
 from core.python_core.utils import crypto_utils
@@ -119,7 +117,7 @@ class Agent(BootAgent):
             A placeholder for a method to decrypt a single line of an encrypted
             log file.
 
-        cmd_broadcast():
+        _cmd_broadcast():
             Broadcasts a message to all currently connected WebSocket clients
             using a thread-safe coroutine.
         """
@@ -165,23 +163,39 @@ class Agent(BootAgent):
                 self.local_spki = None
                 self.log("[WS][SPKI][WARN] Could not compute local SPKI pin", error=e)
 
-            # --- Suspenders: load our signing private key (minted & embedded at deploy)
-            signing_cfg = security.get("signing", {})
-            peer_pub_pem = signing_cfg.get("remote_pubkey")
-            self.peer_pub_key = RSA.import_key(peer_pub_pem.encode()) if peer_pub_pem else None
-            ws_priv_pem = signing_cfg.get("privkey")
 
-            self._serial_num = self.tree_node.get('serial')
-
+            #FAILSAFE
+            # === Security Key Material Loading ===
             try:
-                self.ws_priv = RSA.import_key(ws_priv_pem.encode()) if ws_priv_pem else None
-                if self.ws_priv:
-                    self.log("[WS][SIGN] Private key loaded for outbound signing.")
+                security = self.tree_node.get("config", {}).get("security", {})
+                self._serial_num = self.tree_node.get('serial', {})
+
+                # === Load our signing private key ===
+                signing_cfg = security.get("signing", {})
+                priv_pem = signing_cfg.get("privkey")
+                if priv_pem:
+                    priv_pem = pem_fix(priv_pem)
+                    self._signing_key_obj = RSA.import_key(priv_pem.encode())
+                    self.log("[WS][SIGN] ✅ Private signing key loaded.")
                 else:
-                    self.log("[WS][SIGN][WARN] No signing privkey present in config.security.signing.privkey")
+                    self._signing_key_obj = None
+                    self.log("[WS][SIGN][WARN] No private signing key in config.")
+
+                # === Load their public verify key (for inbound sigs) ===
+                peer_verify_pem = signing_cfg.get("remote_pubkey")
+                if peer_verify_pem:
+                    self._peer_pub_key = RSA.import_key(peer_verify_pem.encode())
+                    self._peer_pub_key_pem = peer_verify_pem
+                    self.log("[WS][SIGN] ✅ Remote public verify key loaded.")
+                else:
+                    self._peer_pub_key = None
+                    self.log("[WS][SIGN][WARN] No remote pubkey (signature verify) in config.")
+
+
             except Exception as e:
-                self.ws_priv = None
-                self.log("[WS][SIGN][ERROR] Failed to load signing private key", error=e)
+                self._signing_key_obj = None
+                self._peer_pub_key = None
+                self.log("[WS][SECURITY][FATAL] ❌ Failed to load cryptographic keys", error=e)
 
             self.log("[CERT-LOADER] Embedded certs loaded into memory.")
 
@@ -459,7 +473,7 @@ class Agent(BootAgent):
                 return None
 
             try:
-                crypto_utils.verify_signed_payload(hello, hello["sig"], self.peer_pub_key)
+                crypto_utils.verify_signed_payload(hello, hello["sig"], self._peer_pub_key)
                 self.log(f"[WS][HELLO] Signature Accepted")
             except Exception as e:
                 self.log(f"[WS][HELLO][DENY] Bad signature: {e}")
@@ -544,7 +558,7 @@ class Agent(BootAgent):
 
                 # --- Signature guard ---
                 try:
-                    crypto_utils.verify_signed_payload(inner, sig_b64, self.peer_pub_key)
+                    crypto_utils.verify_signed_payload(inner, sig_b64, self._peer_pub_key)
                     data = inner
                     self.log(f"[WS][MSG] Signature Accepted")
                 except Exception as e:
@@ -619,7 +633,7 @@ class Agent(BootAgent):
                     self.log(f"[WS][ROUTER][DISPOSED] Session '{session_id}' not found — disposing: Sender: {sender}")
                 else:
                     self.log(f"[WS][ROUTER] No session_id — broadcasting to all: Sender: {sender}.")
-                    self.cmd_broadcast(content, content)
+                    self._cmd_broadcast(content, identity=identity)
 
         except Exception as e:
             self.log("[WS][ROUTER][ERROR] Failed to route RPC packet", error=e)
@@ -634,82 +648,35 @@ class Agent(BootAgent):
         method to send it to all active WebSocket clients.
         """
         try:
+
+            if self.encryption_enabled and identity and identity.has_verified_identity():
+                sender=identity.get_sender_uid()
+            else:
+                sender=packet.get("origin", "not specified")
+
             # Format the alert message
             msg = content.get("formatted_msg") or content.get("msg") or "[SWARM] Alert received."
 
             # Construct GUI-style feed packet
             broadcast_packet = {
-                "handler": "cmd_alert_to_gui",
-                "origin": content.get("origin", "unknown"),
-                "timestamp": time.time(),
+                "handler": "swarm_feed.alert",
                 "content": {
-                    "msg": msg,
-                    "level": content.get("level", "info"),
-                    "origin": content.get("origin", "unknown"),
-                    "formatted_msg": msg
+                    "origin": sender,
+                    "timestamp": time.time(),
+                    "id": uuid.uuid4().hex,
+                    "formatted_msg": msg,
+                    "level": content.get("level", "info")
                 }
             }
 
             # Dispatch it via WebSocket
-            self.cmd_broadcast(broadcast_packet["content"], broadcast_packet)
+            self._cmd_broadcast(broadcast_packet, identity=identity)
 
             self.log("Alert message sent to GUI feed.")
         except Exception as e:
             self.log(error=e)  # Optional: write full trace to logs
 
-
-    # --- Helper: stable canonical JSON (no whitespace, sorted keys)
-    @staticmethod
-    def _canon(obj: dict) -> bytes:
-        """
-        Converts a dictionary to a canonical JSON string.
-
-        This method produces a consistent, compact JSON representation by
-        removing whitespace and sorting keys. This is crucial for creating a
-        stable payload that can be cryptographically signed and verified.
-
-        Returns:
-            bytes: The canonical JSON string as a byte sequence.
-        """
-        return json.dumps(obj or {}, separators=(",", ":"), sort_keys=True).encode()
-
-    @staticmethod
-    def _now() -> float:
-        """
-        Returns the current timestamp.
-        """
-        return time.time()
-
-    def _sign_content(self, content: dict) -> str:
-        """
-        Returns a base64-encoded RS256 signature over canonicalized content.
-
-        This private method signs a given dictionary by first converting it
-        into a canonical JSON string and then using the agent's private key
-        to create a digital signature.
-
-        Returns:
-            str: The base64-encoded signature, or an empty string if no
-                 private key is available.
-        """
-        if not self.ws_priv:
-            return ""
-        h = SHA256.new(self._canon(content))
-        sig = pkcs1_15.new(self.ws_priv).sign(h)
-        return base64.b64encode(sig).decode()
-
-
-    def cmd_alert_to_gui(self, content, packet, identity:IdentityObject = None):
-        """
-        Dispatches a formatted alert to a connected GUI client.
-
-        This is an internal command handler that acts as a bridge between
-        an incoming alert packet and the WebSocket broadcast mechanism.
-        """
-        self.log(f"Dispatching alert to GUI: {content}")
-        self.cmd_broadcast(content, packet)
-
-    def cmd_broadcast(self, content, packet, identity:IdentityObject = None):
+    def _cmd_broadcast(self, content, identity:IdentityObject = None):
         """
         Broadcasts a message to all active WebSocket clients.
 
@@ -720,32 +687,46 @@ class Agent(BootAgent):
         """
         try:
 
-            if not hasattr(self, "loop") or self.loop is None:
+            sender="unknown"
+            if self.encryption_enabled and identity and identity.has_verified_identity():
+                sender=identity.get_sender_uid()
+
+            if self.loop is None:
                 self.log("[WS][REFLEX][SKIP] Event loop not ready.")
                 return
 
-            if not getattr(self, "websocket_ready", False):
-                self.log("[WS][REFLEX][WAITING] Socket not bound.")
-                return
+            data = json.dumps(self._secure_payload(content), separators=(",", ":"), sort_keys=False)
 
-            if self.debug.is_enabled():
-                self.log(f"[WS][REFLEX]{packet}")
-
-            data = json.dumps(packet, separators=(",", ":"), sort_keys=False)
-
-            dead = []
-            for client in self._websocket_clients:
+            for session_id, session in self._sessions.items():
                 try:
-                    asyncio.run_coroutine_threadsafe(client.send(data), self.loop)
-                except Exception:
-                    dead.append(client)
+                    websocket = session["ws"]
+                    self.log(f"[WS][ROUTER] Directing to session {session_id} : Sender: {sender}")
 
-            for c in dead:
-                self._websocket_clients.discard(c)
+                    asyncio.run_coroutine_threadsafe(websocket.send(data), self.loop)
 
-            self.log(f"Broadcasted to {len(self._websocket_clients)} clients.")
+                except Exception as e:
+                    self.log(error=e, block="websocket_send", level="ERROR")
+
         except Exception as e:
-            self.log(error=e)
+            self.log(error=e, block="main_try", level="ERROR")
+
+    def _secure_payload(self, payload: dict):
+        try:
+
+            sealed = encrypt_with_ephemeral_aes(payload,  self._peer_pub_key_pem)
+
+            packet = {
+                "serial": self._serial_num,
+                "content": sealed,
+                "timestamp": int(time.time()),
+            }
+            sig = sign_data(packet, self._signing_key_obj)
+            packet["sig"] = sig
+            self.log('Packet encrypted. Ready for transport')
+            return packet
+
+        except Exception as e:
+            self.log("[WS][SEND][ERROR] Failed to send secure packet", error=e)
 
 if __name__ == "__main__":
     agent = Agent()

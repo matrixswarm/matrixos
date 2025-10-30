@@ -89,11 +89,8 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
 
             #no need to delegate any agents at start
             self._last_tree_verify = time.time()
-
             self._last_consciousness_scan = time.time()
-
             self.tree_path = os.path.join( self.path_resolution["comm_path_resolved"], "directive", "agent_tree_master.json")
-
 
             self.tree_path_dict = {
                  "path": self.path_resolution["comm_path"],
@@ -181,8 +178,6 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
             self._assassin_manager()
         except Exception as e:
             self.log(error=e, level="ERROR")
-
-
 
     def canonize_gospel(self):
         gospel = {

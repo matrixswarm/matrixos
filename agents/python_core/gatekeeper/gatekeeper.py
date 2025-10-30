@@ -168,7 +168,7 @@ class Agent(BootAgent):
             pk2.set_data({
                 "msg": msg_text,
                 "universal_id": self.command_line_args.get("universal_id", "unknown"),
-                "level": "critical",
+                "level": "WARN",
                 "cause": "SSH Login Detected",
                 "origin": self.command_line_args.get("universal_id", "unknown")
             })
