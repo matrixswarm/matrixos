@@ -239,7 +239,7 @@ class Agent(BootAgent, AgentSummaryMixin):
                 # State unchanged
                 if is_healthy:
                     now = time.time()
-                    if self._last_run_log + 600 < now:  # every 5 minutes
+                    if self._last_run_log + 600 < now:  # every 10 minutes
                         self.log(f"[WATCHDOG] ✅ {self.service_name} status is stable.")
                         self._last_run_log = now
                 else:

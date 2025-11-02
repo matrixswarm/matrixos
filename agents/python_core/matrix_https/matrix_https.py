@@ -369,8 +369,6 @@ class Agent(BootAgent):
                 matrix_packet=inner.get("matrix_packet")
                 ts = inner.get('ts')
 
-                self.log(f"{inner}")
-
                 # 3) Size / structure guard on inner packet
                 if not guard_packet_size(matrix_packet, log=self.log):
                     return jsonify({"status": "error", "message": "bad or oversized payload"}), 413
@@ -397,23 +395,22 @@ class Agent(BootAgent):
                 if not isinstance(matrix_packet, dict):
                     return jsonify({"status": "error", "message": "bad packet format"}), 400
 
+                if self.debug.is_enabled():
+                    self.log(f"{inner}")
+
                 # 8) All gates passed — relay to Matrix
                 self.log(f"[MATRIX-HTTPS][RELAY] cmd_the_source from {ip}")
 
                 pk = self.get_delivery_packet("standard.command.packet", new=True)
                 pk.set_data({'handler': "cmd_the_source", "content":matrix_packet})  # relay the verified inner command
 
-
                 # 9) Forward to Matrix
                 self.pass_packet(pk, target_uid="matrix")
                 return jsonify({"status": "ok", "message": "Relayed to Matrix"})
 
-
             except Exception as e:
                 self.log(f"[MATRIX-HTTPS][ERROR]", error=e, block="main_try")
                 return jsonify({"status": "error", "message": str(e)}), 500
-
-
 
         @self.app.route("/matrix", methods=["GET", "PUT", "DELETE", "OPTIONS", "HEAD"])
         def deny_unsupported_methods():

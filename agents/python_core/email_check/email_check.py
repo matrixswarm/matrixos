@@ -44,7 +44,6 @@ class Agent(BootAgent):
     def worker(self, config:dict = None, identity:IdentityObject = None):
 
 
-
         try:
 
             self._emit_beacon()

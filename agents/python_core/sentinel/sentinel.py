@@ -9,6 +9,7 @@
 
 import sys
 import os
+import time
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 import threading
@@ -51,6 +52,7 @@ class Agent(BootAgent):
         self.watching = config.get("watching", "the Matrix")
         self.universal_id_under_watch = config.get("universal_id_under_watch", False)
         self.target_node = None
+        self._last_run_log=0
         self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
         self._emit_beacon_watch_cycle = self.check_for_thread_poke("watch_cycle", timeout=60, emit_to_file_interval=10)
 
@@ -120,7 +122,11 @@ class Agent(BootAgent):
 
                         universal_id = self.security_box.get('node').get("universal_id")
 
-                        self.log(f"[SENTINEL] Watching Universal ID: {universal_id}")
+                        now = time.time()
+                        if self._last_run_log + 600 < now:  # every 10 min
+                            self.log(f"[SENTINEL] Watching Universal ID: {universal_id}")
+                            self._last_run_log = now
+
 
                         if not universal_id:
                             self.log("Target node missing universal_id. Breathing idle.", block="WATCHING")

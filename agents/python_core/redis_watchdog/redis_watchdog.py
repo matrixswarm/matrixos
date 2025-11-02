@@ -245,7 +245,7 @@ class Agent(BootAgent, AgentSummaryMixin):
                 if not accessible:
                     self.alert_operator("⚠️ Redis is active but unreachable via port or socket.")
                 now = time.time()
-                if self._last_run_log  + 600 < now:  # 300 s = 5 min
+                if self._last_run_log  + 600 < now:  # 300 s = 10 min
                     self.log("[HAMMER] ✅ Redis is running.")
                     self._last_run_log = now
 

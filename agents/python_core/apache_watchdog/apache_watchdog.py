@@ -319,7 +319,7 @@ class Agent(BootAgent, AgentSummaryMixin):
                 # State unchanged
                 if is_healthy:
                     now = time.time()
-                    if self._last_run_log + 600 < now:  # every 5 min
+                    if self._last_run_log + 600 < now:  # every 10 min
                         self.log("[WATCHDOG] ✅ Apache status is stable.")
                         self._last_run_log = now
                 else:

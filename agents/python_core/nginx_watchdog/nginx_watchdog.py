@@ -331,7 +331,7 @@ class Agent(BootAgent, AgentSummaryMixin):
                 self.update_status_metrics(is_healthy)
                 if is_healthy:
                     now = time.time()
-                    if self._last_run_log + 300 < now:  # every 5 min
+                    if self._last_run_log + 600 < now:  # every 10 min
                         self.log(f"[WATCHDOG] ✅ {self.service_name} status is stable.")
                         self._last_run_log = now
                 else:
