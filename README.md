@@ -1,4 +1,5 @@
 # MatrixOS  
+[![Support on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/matrixswarm)
 (from the MatrixSwarm ecosystem)
 
 MatrixOS is the **multi-language swarm runtime** of the MatrixSwarm ecosystem.  
@@ -6,7 +7,7 @@ Agents run side-by-side — not under you — operating through file-based commu
 #### Python ≥ 3.10 is required
 #### MatrixOS https://github.com/matrixswarm/phoenix required if connecting externally
 - Written in Python with Go and Rust agents in development.  
-- Encrypted, resurrectable, and fully decentralized.  
+- Encrypted, resurrected, and fully decentralized.  
 - Every agent is signed, sandboxed, and resurrected if killed.  
 ---
 
