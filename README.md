@@ -1,6 +1,37 @@
 # MatrixOS  
-[![Support on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/matrixswarm)
 (from the MatrixSwarm ecosystem)
+## 🚪 Access Locked — Vault Closed
+
+All updates, bugfixes, and tools are being withheld.  
+No uploads. No pushes. No releases. Not until the unlock hits.
+
+You don’t get the real Coke until it’s paid for.  
+This includes:
+
+- 💥 Full encrypted IMAP mailbox syncing (swarm-native)
+- 📥 Persistent, encrypted email storage under /matrix/universes/static/phoenix/latest/comm/<email_check>/mailbox/<mailbox_account>/cur/
+- 📤 SMTP email send from Phoenix to *any server* (on the fly)
+- 🔁 Persistent reuse of universes — **no reboot needed**
+- other bug fixes
+---
+
+## 🔓 Unlock the Drop
+
+When the goal is reached, everything drops.  
+Fixes. Additions. Features. Full stack.  
+
+---
+
+## 🧃 Support the Unlock
+
+Want to accelerate the release?
+
+- [Ko-fi — Tip to unlock](https://ko-fi.com/matrixswarm)
+- Bitcoin — `bc1qasqk5xn9j7cdddmeclxddzvym2sdv7d8g3xrtz`
+
+> _Progress is being tracked privately. No public count._  
+> _No partial releases. No previews. No forks._
+
 
 MatrixOS is the **multi-language swarm runtime** of the MatrixSwarm ecosystem.  
 Agents run side-by-side — not under you — operating through file-based communication.
