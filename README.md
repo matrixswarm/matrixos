@@ -1,38 +1,5 @@
 # MatrixOS  
 (from the MatrixSwarm ecosystem)
-## 🚪 Access Locked — Vault Closed
-
-All updates, bugfixes, and tools are being withheld.  
-No uploads. No pushes. No releases. Not until the unlock hits.
-
-You don’t get the real Coke until it’s paid for.  
-This includes:
-
-- Added 2AUTH to swarm; ingress/egress agents (matrix_websocket, matrix_https) closed until 2auth token verified - all configurable and dynamic
-- Added "clean stale connection flags" method to matrix_websocket 
-- Full encrypted IMAP mailbox syncing (swarm-native)
-- Persistent, encrypted email storage under /matrix/universes/static/phoenix/latest/comm/<email_check>/mailbox/<mailbox_account>/cur/
-- SMTP email send from Phoenix to *any server* (on the fly)
-- Persistent reuse of universes — **no reboot needed**
-- other bug fixes
----
-
-## 🔓 Unlock the Drop
-
-When the goal is reached, everything drops.  
-Fixes. Additions. Features. Full stack.  
-
----
-
-## 🧃 Support the Unlock
-
-Want to accelerate the release?
-
-- [Ko-fi — Tip to unlock](https://ko-fi.com/matrixswarm)
-- Bitcoin — `bc1qasqk5xn9j7cdddmeclxddzvym2sdv7d8g3xrtz`
-
-> _Progress is being tracked privately. No public count._  
-> _No partial releases. No previews. No forks._
 ---
 MatrixOS is the **multi-language swarm runtime** of the MatrixSwarm ecosystem.  
 Agents run side-by-side — not under you — operating through file-based communication.
@@ -41,6 +8,31 @@ Agents run side-by-side — not under you — operating through file-based commu
 - Written in Python with Go and Rust agents in development.  
 - Encrypted, resurrected, and fully decentralized.  
 - Every agent is signed, sandboxed, and resurrected if killed.  
+---
+ 
+## Next drop includes:
+
+- Added matrix_websocket spki client verification
+- Added 2AUTH to swarm; ingress/egress agents (matrix_websocket, matrix_https) closed until 2auth token verified - all configurable and dynamic
+- Added "clean stale connection flags" method to matrix_websocket 
+- Full encrypted IMAP mailbox syncing (swarm-native)
+- Persistent, encrypted email storage under /matrix/universes/static/phoenix/latest/comm/<email_check>/mailbox/<mailbox_account>/cur/
+- SMTP email send from Phoenix to *any server* (on the fly)
+- Persistent reuse of universes — **no reboot needed**
+- other bug fixes
+---
+## 💙 Support Development
+
+If you find **MatrixOS** or the broader **MatrixSwarm ecosystem** useful and want to support ongoing updates,  
+you can buy me a coffee here:
+
+☕ **[ko-fi.com/matrixswarm](https://ko-fi.com/matrixswarm)**
+
+Your support helps sustain development of MatrixOS, Phoenix Cockpit, and future agent frameworks —  
+funding open-source maintenance, documentation, and ecosystem growth.
+
+- Bitcoin — bc1qasqk5xn9j7cdddmeclxddzvym2sdv7d8g3xrtz
+
 ---
 
 ## ⚡ Quick Start
