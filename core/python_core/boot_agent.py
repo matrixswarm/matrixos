@@ -109,6 +109,9 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
         config = EncryptionConfig()
 
+        #to be accessed by long packet_listener processes
+        self._emit_beacon_packet_listener = self.check_for_thread_poke("packet_listener", timeout=60)
+
         #automatic throttle
         self.throttle_queue = queue.Queue(maxsize=1)
 
@@ -582,7 +585,6 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
         self.log("Monitoring incoming packets...")
         incoming_path = os.path.join(self.path_resolution["comm_path_resolved"], "incoming")
         os.makedirs(incoming_path, exist_ok=True)
-        emit_beacon = self.check_for_thread_poke("packet_listener", timeout=60)
         last_dir_mtime = os.path.getmtime(incoming_path)
         #TOP TRY
         try:
@@ -601,7 +603,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             #Main Try
             try:
 
-                emit_beacon()
+                self._emit_beacon_packet_listener()
 
                 current_dir_mtime = os.path.getmtime(incoming_path)
                 if current_dir_mtime != last_dir_mtime:

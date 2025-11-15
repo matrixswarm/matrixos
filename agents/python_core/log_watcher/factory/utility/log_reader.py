@@ -1,5 +1,5 @@
 # Authored by Daniel F MacDonald and ChatGPT-5 aka The Generals
-import subprocess, os, time
+import os, time
 from log_watcher.factory.utility.parse_results import parse_results
 
 def tail_file(path, n=500, block_size=8192):

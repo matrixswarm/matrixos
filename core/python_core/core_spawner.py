@@ -51,7 +51,7 @@ class CoreSpawner(CoreSpawnerSecureMixin):
     It prepares the agent's filesystem, sets up secure communication channels,
     and launches the agent process with a secure, encrypted environment.
     """
-    def __init__(self, universe, base_path, reboot_uuid=None, python_site=None, detected_python=None):
+    def __init__(self, universe, base_path, reboot_uuid=None, python_site=None, detected_python=None, booting=False, args=None):
         """
         Initializes the CoreSpawner instance.
 
@@ -71,6 +71,7 @@ class CoreSpawner(CoreSpawnerSecureMixin):
         """
         super().__init__()
 
+        self._keychain = {}
         self.verbose=False
         self.debug = False
         self.rug_pull = False
@@ -92,11 +93,118 @@ class CoreSpawner(CoreSpawnerSecureMixin):
             {"name": "config", "type": "d", "content": None, "meta": "Updated configs go here"},
         ]
 
-        self.pm = PathManager(universe, base_path, reboot_uuid)
+        if not bool(booting):
+
+            self.pm = PathManager(universe, base_path, reboot_uuid)
+
+        else:
+
+            universe_root = Path(base_path) / "universes" / "runtime" / universe
+
+            # determine which mode applies
+            if args.reboot_id:
+                self.pm = PathManager(universe, base_path, reboot_uuid=args.reboot_id, mode="resume")
+                self._cleanup()  # remove incoming/die and/or incoming/punji
+                print(f"[SPAWNER] Resuming reboot UUID: {args.reboot_id}")
+
+            elif args.reboot_new:
+                self.pm = PathManager(universe, base_path, mode="new")
+                print(f"[SPAWNER] New reboot_uuid: {self.pm.reboot_uuid}")
+
+            else:
+
+                # try to reuse latest
+                candidates = [
+                    p.name for p in universe_root.iterdir()
+                    if p.is_dir() and p.name.replace("_", "").isdigit()
+                ]
+                if candidates:
+                    latest_uuid = sorted(candidates)[-1]
+                    self.pm = PathManager(universe, base_path, reboot_uuid=latest_uuid, mode="reuse")
+                    self._cleanup() #remove incoming/die and/or incoming/punji
+                    print(f"[SPAWNER] ♻️ Reusing latest reboot_uuid: {latest_uuid}")
+                    # clean old pods before continuing
+                    pod_path = Path(self.pm.session.runtime_pod_path)
+                    if pod_path.exists():
+                        for pod in pod_path.iterdir():
+                            if pod.is_dir():
+                                shutil.rmtree(pod, ignore_errors=True)
+                        print(f"[SPAWNER] 🧹 Cleared stale pods in {pod_path}")
 
 
+            # handle --clean
+            if args.clean:
+                print("[SPAWNER] Cleaning runtime directories…")
+                for key in ["runtime_comm", "runtime_pod"]:
+                    path = Path(self.pm.resolve(key))
+                    if path.exists():
+                        shutil.rmtree(path, ignore_errors=True)
+                        print(f"[SPAWNER] Removed {path}")
+                print("[SPAWNER] Runtime purge complete (static preserved)")
 
-        self._keychain={}
+    def _cleanup(self):
+        # --- Nuke old logs on reboot ---
+        log_root = Path(self.pm.session.static_comm_path)
+        if log_root.exists():
+            for agent_dir in log_root.iterdir():
+                if not agent_dir.is_dir():
+                    continue
+                log_dir = agent_dir / "logs"
+                if log_dir.exists():
+                    shutil.rmtree(log_dir, ignore_errors=True)
+            print(f"[SPAWNER] Purged old logs in {log_root}")
+
+        # clean old pods before continuing
+        pod_path = Path(self.pm.session.runtime_pod_path)
+        if pod_path.exists():
+            for pod in pod_path.iterdir():
+                if pod.is_dir():
+                    shutil.rmtree(pod, ignore_errors=True)
+            print(f"[SPAWNER] Cleared stale pods in {pod_path}")
+
+        # ALSO clean old die/hello.moto signals
+        comm_path = Path(self.pm.session.runtime_comm_path)
+        if comm_path.exists():
+            for agent_dir in comm_path.iterdir():
+                if not agent_dir.is_dir():
+                    continue
+                incoming = agent_dir / "incoming"
+                hello = agent_dir / "hello.moto"
+                spawn = agent_dir / "spawn"
+                directive = agent_dir / "directive"
+
+                # remove die cookies
+                if incoming.exists():
+                    for file in incoming.iterdir():
+                        try:
+                            file.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+
+                if spawn.exists():
+                    for spawn in spawn.iterdir():
+                        try:
+                            spawn.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+
+                # clear out old pokes and signals
+                if hello.exists():
+                    for poke in hello.iterdir():
+                        try:
+                            poke.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+
+                if directive.exists():
+                    for agent_tree in directive.iterdir():
+                        try:
+                            agent_tree.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+
+            print(f"[SPAWNER] Cleared stale incoming + hello.moto + spawn signals in {comm_path}")
+
 
     def set_keys(self, key_dict: dict):
         """

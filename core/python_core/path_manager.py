@@ -1,11 +1,11 @@
-import os
+
 from .swarm_session_root import SwarmSessionRoot
 
 class PathManager:
-    def __init__(self, universe: str, base: str, reboot_uuid: str = None):
+    def __init__(self, universe: str, base: str, reboot_uuid: str = None, mode="new"):
         self.universe = universe
         self.base = base
-        self.session = SwarmSessionRoot(universe, base, reboot_uuid=reboot_uuid)
+        self.session = SwarmSessionRoot(universe, base, reboot_uuid=reboot_uuid, mode=mode)
         self.reboot_uuid = self.session.reboot_uuid
 
         # Swarm path templates (all paths use the same variable style)

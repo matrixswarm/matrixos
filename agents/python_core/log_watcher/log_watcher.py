@@ -33,7 +33,7 @@ class Agent(BootAgent):
             self._last_alert=0
             self._alert_cooldown=0
 
-            self.oracle_timeout = int(cfg.get("oracle_timeout", 120))
+            self.oracle_timeout = int(cfg.get("oracle_timeout", 600))
             self._active_collectors = []
             self.collectors = cfg.get("collectors", ["httpd", "sshd"])
             self._rpc_role = self.tree_node.get("rpc_router_role", "hive.rpc")
@@ -112,6 +112,10 @@ class Agent(BootAgent):
 
             try:
                 key = name.strip().lower()
+                self.log(
+                    f"[LOG-WATCHER][COLLECT] → {name} | paths={cfg.get("paths",[])} | max_lines={cfg.get("max_lines",[])} | rotate_depth={cfg.get("rotate_depth",[])}"
+                )
+
                 if limit_to and key not in limit_to:
                     continue
 

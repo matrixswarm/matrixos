@@ -9,7 +9,7 @@ class AgentSummaryMixin:
 
         label: short identifier like "nginx", "apache", or "redis"
         """
-        summary_dir = os.path.join(self.path_resolution["comm_path_resolved"], "summary")
+        summary_dir = os.path.join(self.path_resolution["static_comm_path_resolved"], "summary")
         os.makedirs(summary_dir, exist_ok=True)
 
         summary = {

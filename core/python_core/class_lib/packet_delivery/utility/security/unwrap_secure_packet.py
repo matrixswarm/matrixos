@@ -1,7 +1,7 @@
 import json
 import hashlib, time
 _replay_cache = {}
-_REPLAY_TTL = 120  # seconds for normal transient packets
+_REPLAY_TTL = 314  # seconds for normal transient packets
 
 from Crypto.PublicKey import RSA
 from core.python_core.utils.crypto_utils import verify_signed_payload, decrypt_with_ephemeral_aes

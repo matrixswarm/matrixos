@@ -153,12 +153,12 @@ class Agent(BootAgent):
 
             self.payload_dir = os.path.join(self.path_resolution['comm_path'], "matrix", "payload")
 
-            security = config.get("security", {}) or {}
-            conn = security.get("connection", {}) or {}
+            security = config.get("security")
+            conn = security.get("connection")
 
-            server_cert = conn.get("server_cert", {}) or {}
-            client_cert = conn.get("client_cert", {}) or {}
-            ca_root = conn.get("ca_root", {}) or {}
+            server_cert = conn.get("server_cert")
+            client_cert = conn.get("client_cert")
+            ca_root = conn.get("ca_root")
 
             # Load our server TLS cert & key
             cert_pem = server_cert.get("cert")
@@ -169,19 +169,12 @@ class Agent(BootAgent):
                 raise ValueError("Missing server TLS cert/key in connection.server_cert")
 
             # Store in-memory PEMs
-            self.cert_pem = pem_fix(cert_pem)
-            self.key_pem = pem_fix(key_pem)
-            self.ca_pem = pem_fix(ca_pem) if ca_pem else None
+            self._cert_pem = pem_fix(cert_pem)
+            self._key_pem = pem_fix(key_pem)
+            self._ca_pem = pem_fix(ca_pem)
 
-            # Compute local SPKI pin for diagnostics (optional)
-            try:
-                self.local_spki = extract_spki_pin_from_cert(self.cert_pem.encode())
-            except Exception as e:
-                self.local_spki = None
-                self.log("[HTTPS][SPKI][WARN] Could not compute local SPKI pin", error=e)
-
-            # Optionally track expected client SPKI pin (not enforced)
-            self.expected_peer_spki = client_cert.get("spki_pin")
+            # track expected client SPKI pin (not enforced)
+            self._expected_peer_spki = client_cert.get("spki_pin")
 
             # Optionally load remote_pubkey for packet signature auth
             self._signing_keys = security.get("signing", {})
@@ -194,10 +187,10 @@ class Agent(BootAgent):
                 self._peer_pub_key = RSA.import_key(self._signing_keys.get("remote_pubkey").encode())
 
             self.log(f"[SERVER-CERT-DEBUG] uid={self.command_line_args['universal_id']} "
-                  f"cert_len={len(cert_pem or '')} "
-                  f"key_len={len(key_pem or '')} "
-                  f"ca_len={len(ca_pem or '')} "
-                  f"spki_pin={self.expected_peer_spki}")
+                  f"cert_len={len(self._cert_pem)} "
+                  f"key_len={len(self._key_pem)} "
+                  f"ca_len={len(self._ca_pem)} "
+                  f"spki_pin={self._expected_peer_spki}")
 
             self.log("[CERT-LOADER] In-memory TLS certs loaded successfully.")
             self.configure_routes()
@@ -351,12 +344,12 @@ class Agent(BootAgent):
 
                 # 1) TLS client-cert SPKI pin (bind transport to expected peer)
                 cert_bin = request.environ.get("peercert", None)
-                if not cert_bin or not self.expected_peer_spki:
+                if not cert_bin or not self._expected_peer_spki:
                     return jsonify({"status": "denied", "message": "missing peer cert or pin"}), 403
 
                 actual_pin = extract_spki_pin_from_cert(cert_bin)
-                if actual_pin != self.expected_peer_spki:
-                    self.log(f"[HTTPS][SPKI DENY] got {actual_pin}, expected {self.expected_peer_spki}")
+                if actual_pin != self._expected_peer_spki:
+                    self.log(f"[HTTPS][SPKI DENY] got {actual_pin}, expected {self._expected_peer_spki}")
                     return jsonify({"status": "denied", "message": "SPKI mismatch"}), 403
 
                 # 2) Parse JSON
@@ -512,12 +505,11 @@ class Agent(BootAgent):
                 self.log("[HTTPS] Starting run_server()...")
 
                 context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+
                 # Require client certs, but don't allow them to stall forever
                 context.verify_mode = ssl.CERT_REQUIRED
-                load_cert_chain_from_memory(context, self.cert_pem, self.key_pem)
-
-                if self.ca_pem:
-                    context.load_verify_locations(cadata=self.ca_pem)
+                load_cert_chain_from_memory(context, self._cert_pem, self._key_pem)
+                context.load_verify_locations(cadata=self._ca_pem)
 
                 httpd = make_server(
                     "0.0.0.0",

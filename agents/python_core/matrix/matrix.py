@@ -113,14 +113,6 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
             # delegate Matrix her Tree
             self.delegate_tree_to_agent("matrix", self.tree_path_dict)
 
-
-            # Inject payload_path if it's not already present
-            if "payload_path" not in self.path_resolution:
-                self.path_resolution["payload_path"] = os.path.join(
-                    self.path_resolution["comm_path_resolved"],
-                    "payload"
-                )
-
             self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
 
         except Exception as e:
@@ -284,7 +276,7 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
 
             unwrapped = unwrap_secure_packet(content, self._signing_keys["remote_pubkey"], self._signing_keys.get("privkey"), logger=self.log)
             if not unwrapped:
-                self.log(f"[GATE] ❌ Secure unwrap failed or invalid structure. {packet}")
+                self.log(f"[GATE] ❌ Secure unwrap failed or invalid structure.")
                 return
 
             self.log(f"[GATE] Signature accepted.")

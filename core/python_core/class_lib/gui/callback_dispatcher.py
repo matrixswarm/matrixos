@@ -112,6 +112,7 @@ class PhoenixCallbackDispatcher:
             # === 3. Encrypt + Sign ===
             payload = {"handler": handler, "content": content}
 
+            self.agent.log(f"{payload}")
 
             sealed = encrypt_with_ephemeral_aes(payload, remote_pub_pem)
             wrapper = {
@@ -119,16 +120,21 @@ class PhoenixCallbackDispatcher:
                 "content": sealed,
                 "timestamp": int(time.time()),
             }
+
             wrapper["sig"] = sign_data(wrapper, signing_key)
 
             pk = self.agent.get_delivery_packet("standard.command.packet")
-            pk.set_data({
+
+            data = {
                 "handler": "dummy_handler",
                 "origin": origin,
-                "session_id": session_id,
                 "content": wrapper,
                 "token": token,
-            })
+            }
+            if session_id is not None:
+                data["session_id"] = session_id
+
+            pk.set_data(data)
 
             # === 4. Send ===
             for ep in endpoints:

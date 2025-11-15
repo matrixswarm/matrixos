@@ -145,33 +145,39 @@ class Agent(BootAgent):
             self.interval = 10
             self.first_run = True
 
-            security = self.tree_node.get("config", {}).get("security", {})  # dict now
-            conn = security.get("connection", {}) or {}
+            self._last_flag_cleanup=0
 
-            server_cert = conn.get("server_cert", {})
-            client_cert = conn.get("client_cert", {})
-            ca_root = conn.get("ca_root", {})
+            security = config.get("security")
+            conn = security.get("connection")
 
-            self.cert_pem = pem_fix(server_cert.get("cert"))
-            self.key_pem = pem_fix(server_cert.get("key"))
-            self.ca_pem = pem_fix(ca_root.get("cert"))
+            server_cert = conn.get("server_cert")
+            client_cert = conn.get("client_cert")
+            ca_root = conn.get("ca_root")
 
-            # Compute SPKI pin directly from memory
-            try:
-                self.local_spki = extract_spki_pin_from_cert(self.cert_pem.encode())
-            except Exception as e:
-                self.local_spki = None
-                self.log("[WS][SPKI][WARN] Could not compute local SPKI pin", error=e)
+            # Load our server TLS cert & key
+            cert_pem = server_cert.get("cert")
+            key_pem = server_cert.get("key")
+            ca_pem = ca_root.get("cert")
 
+            if not cert_pem or not key_pem:
+                raise ValueError("Missing server TLS cert/key in connection.server_cert")
+
+            # Store in-memory PEMs
+            self._cert_pem = pem_fix(cert_pem)
+            self._key_pem = pem_fix(key_pem)
+            self._ca_pem = pem_fix(ca_pem)
+
+            # track expected client SPKI pin (not enforced)
+            self._expected_peer_spki = client_cert.get("spki_pin")
 
             #FAILSAFE
             # === Security Key Material Loading ===
             try:
-                security = self.tree_node.get("config", {}).get("security", {})
-                self._serial_num = self.tree_node.get('serial', {})
+
+                self._serial_num = self.tree_node.get('serial')
 
                 # === Load our signing private key ===
-                signing_cfg = security.get("signing", {})
+                signing_cfg = security.get("signing")
                 priv_pem = signing_cfg.get("privkey")
                 if priv_pem:
                     priv_pem = pem_fix(priv_pem)
@@ -190,7 +196,6 @@ class Agent(BootAgent):
                 else:
                     self._peer_pub_key = None
                     self.log("[WS][SIGN][WARN] No remote pubkey (signature verify) in config.")
-
 
             except Exception as e:
                 self._signing_key_obj = None
@@ -224,6 +229,16 @@ class Agent(BootAgent):
         fully operational and the perimeter guard is in place.
         """
         self.log(f"{self.NAME} v{self.AGENT_VERSION} – perimeter guard up.")
+
+    def packet_listener_post(self):
+        try:
+            #clean old flags every 60 sec's
+            if (time.time() - self._last_flag_cleanup) > 60:
+                self._last_flag_cleanup = time.time()
+                self._cleanup_old_broadcast_flags()
+
+        except Exception as e:
+            self.log(error=e, level="ERROR")
 
     def worker(self, config:dict = None, identity:IdentityObject = None):
         """
@@ -289,19 +304,16 @@ class Agent(BootAgent):
             self.loop = loop
 
             async def launch():
+
                 self.log("[WS] Preparing SSL context...")
                 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 ssl_context.verify_mode = ssl.CERT_REQUIRED
 
-                if self.cert_pem and self.key_pem:
-                    load_cert_chain_from_memory(ssl_context, self.cert_pem, self.key_pem)
+                load_cert_chain_from_memory(ssl_context, self._cert_pem, self._key_pem)
 
                 # Load CA root from memory if present
-                if self.ca_pem:
-                    ssl_context.load_verify_locations(cadata=self.ca_pem)
-                    self.log("[WS][DEBUG] Loaded CA root from memory")
-                else:
-                    self.log("[WS][WARN] No client CA provided — clients may not present a cert")
+                ssl_context.load_verify_locations(cadata=self._ca_pem)
+                self.log("[WS][DEBUG] Loaded CA root from memory")
 
                 try:
                     server = await websockets.serve(
@@ -399,13 +411,21 @@ class Agent(BootAgent):
                 ip = "unknown"
             self.log(f"[WS][CONNECT] Client connected from IP: {ip}")
 
-            cert_bin = websocket.transport.get_extra_info("peercert", default=None)
+            sslobj = websocket.transport.get_extra_info("ssl_object")
+            cert_bin = sslobj.getpeercert(binary_form=True) if sslobj else None
 
-            if not cert_bin:
-                self.log(
-                    f"[WS][NO CLIENT CERT] No client certificate presented by IP {ip} — cannot perform SPKI pin check")
+            if not cert_bin or not self._expected_peer_spki:
                 await websocket.close(reason="No client cert")
                 return
+
+            actual_pin = extract_spki_pin_from_cert(cert_bin)
+
+            if actual_pin != self._expected_peer_spki:
+                self.log(f"[WS][SPKI DENY] got {actual_pin}, expected {self._expected_peer_spki}")
+                await websocket.close(reason="SPKI mismatch")
+                return
+            else:
+                self.log(f"[WS][SPKI Verified] (peer={actual_pin}, expected={self._expected_peer_spki})")
 
             # Explicitly confirm the client is in allowlist (or no allowlist restriction)
             if self.allowlist_ips:
@@ -417,8 +437,6 @@ class Agent(BootAgent):
                     self.log(f"[WS][SECURITY] IP {ip} explicitly allowed by allowlist")
             else:
                 self.log("[WS][SECURITY] No IP allowlist restriction in place")
-
-            # ... cert + allowlist checks here ...
 
             # Phase 1: Handshake
             sid = await self._handle_handshake(websocket)
@@ -438,7 +456,7 @@ class Agent(BootAgent):
                 sid = websocket.session_id
                 self._sessions.pop(sid, None)
                 self.update_broadcast_flag(session_id=sid, remove=True)
-            self.log(f"[WS][CLEANUP] Client removed. Active={len(self._websocket_clients)}")
+            self.log(f"[WS][CLEANUP] Client '{sid}' removed. Active={len(self._websocket_clients)}")
 
     async def _handle_handshake(self, websocket):
         """
@@ -543,7 +561,7 @@ class Agent(BootAgent):
 
                 # --- Size guard ---
                 if not guard_packet_size(inner, log=self.log):
-                    await websocket.send(json.dumps({"type": "error", "message": "bad or oversized payload"}))
+                    await websocket.send(json.dumps({"type": "error", "message": "bad or oversize payload"}))
                     continue
 
                 # --- Timestamp / Replay guard ---
@@ -601,6 +619,44 @@ class Agent(BootAgent):
         open(flag, "w").close()
         os.utime(flag, None)
 
+    def _cleanup_old_broadcast_flags(self):
+        """
+        Remove stale WebSocket broadcast flags from the /broadcast directory.
+        This runs once per packet_listener() cycle (via packet_listener_post).
+        """
+        try:
+            broadcast_dir = os.path.join(self.path_resolution["comm_path_resolved"], "broadcast")
+            if not os.path.isdir(broadcast_dir):
+                return
+
+            now = time.time()
+            active = set(self._sessions.keys())
+            removed = 0
+
+            for fname in os.listdir(broadcast_dir):
+                if not fname.startswith("connected.flag"):
+                    continue
+                fpath = os.path.join(broadcast_dir, fname)
+
+                # Extract session id (if present)
+                parts = fname.split(".")
+                sid = parts[-1] if len(parts) > 2 else None
+
+                # delete if stale or not in active sessions
+                if (sid and sid not in active) or (now - os.path.getmtime(fpath) > 900):
+                    try:
+                        os.remove(fpath)
+                        removed += 1
+                    except Exception:
+                        continue
+
+            if removed and self.debug.is_enabled():
+                self.log(f"[WS][CLEANUP] Removed {removed} stale broadcast flags from {broadcast_dir}")
+
+        except Exception as e:
+            self.log("[WS][CLEANUP][ERROR] Broadcast cleanup failed", error=e)
+
+
     def cmd_rpc_route(self, content, packet, identity:IdentityObject = None):
         """
         Routes an RPC-style packet to a specific GUI session.
@@ -612,13 +668,14 @@ class Agent(BootAgent):
         """
         try:
 
-            session_id = packet.get("session_id")
+            session_id = packet.get("session_id", False)
             #Note: never depend on origin, you should only depend on identity, and that is only live when encryption is turned on for the swarm
             #      because that is cryptigraphically certain to be the agent
             if identity and identity.has_verified_identity():
                 sender=identity.get_sender_uid()
             else:
                 sender=packet.get("origin", "not specified")
+
 
             if session_id and session_id in self._sessions:
                 websocket = self._sessions[session_id]["ws"]
@@ -633,7 +690,8 @@ class Agent(BootAgent):
                     self.log(f"[WS][ROUTER][DISPOSED] Session '{session_id}' not found — disposing: Sender: {sender}")
                 else:
                     self.log(f"[WS][ROUTER] No session_id — broadcasting to all: Sender: {sender}.")
-                    self._cmd_broadcast(content, identity=identity)
+                    encrypt_outgoing = content.get("encrypt_outgoing", False) #assume the agent already encrypted the message
+                    self._cmd_broadcast(content, identity=identity, encrypt_outgoing=bool(encrypt_outgoing))
 
         except Exception as e:
             self.log("[WS][ROUTER][ERROR] Failed to route RPC packet", error=e)
@@ -676,7 +734,7 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(error=e)  # Optional: write full trace to logs
 
-    def _cmd_broadcast(self, content, identity:IdentityObject = None):
+    def _cmd_broadcast(self, content, identity:IdentityObject = None, encrypt_outgoing=True):
         """
         Broadcasts a message to all active WebSocket clients.
 
@@ -691,18 +749,25 @@ class Agent(BootAgent):
             if self.encryption_enabled and identity and identity.has_verified_identity():
                 sender=identity.get_sender_uid()
 
+            if not isinstance(content, dict):
+                self.log("[WS][REFLEX][SKIP] Content is not a dict.")
+                return
+
             if self.loop is None:
                 self.log("[WS][REFLEX][SKIP] Event loop not ready.")
                 return
 
-            data = json.dumps(self._secure_payload(content), separators=(",", ":"), sort_keys=False)
+            if bool(encrypt_outgoing):
+                content = self._secure_payload(content)
+
+            content = json.dumps(content, separators=(",", ":"), sort_keys=False)
 
             for session_id, session in self._sessions.items():
                 try:
                     websocket = session["ws"]
                     self.log(f"[WS][ROUTER] Directing to session {session_id} : Sender: {sender}")
 
-                    asyncio.run_coroutine_threadsafe(websocket.send(data), self.loop)
+                    asyncio.run_coroutine_threadsafe(websocket.send(content), self.loop)
 
                 except Exception as e:
                     self.log(error=e, block="websocket_send", level="ERROR")

@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 class SwarmSessionRoot:
-    def __init__(self, universe: str, base_path: str, reboot_uuid: str = None):
+    def __init__(self, universe: str, base_path: str, reboot_uuid: str = None, mode: str = "new"):
         self.universe = universe
         self.base = base_path
         self.reboot_uuid = reboot_uuid or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -17,8 +17,18 @@ class SwarmSessionRoot:
         self.static_comm_path = self.static_root / "comm"
         self.static_pod_path = self.static_root / "pod"
 
-        self.create_directories()
-        self.set_latest_symlinks()
+        if mode == "new":
+            # full fresh start
+            self.create_directories()
+            self.set_latest_symlinks()
+
+        elif mode == "reuse":
+            # reuse static + comm, but clear pods
+            if self.runtime_pod_path.exists():
+                for pod in self.runtime_pod_path.iterdir():
+                    if pod.is_dir():
+                        shutil.rmtree(pod, ignore_errors=True)
+            print(f"[SWARM][REUSE] Reused existing session: {self.reboot_uuid}, pods cleared.")
 
     def create_directories(self):
         for path in [

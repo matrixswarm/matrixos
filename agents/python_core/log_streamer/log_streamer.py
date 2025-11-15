@@ -33,7 +33,7 @@ class Agent(BootAgent):
             self.heartbeat_ttl = int(cfg.get("heartbeat_ttl", 30))
             self.rate_limit = float(cfg.get("rate_limit", 2.0))  # seconds between sends
 
-            self.active_streams = {}  # {session_id: {...}}
+            self.active_streams = {}
 
             self.rpc_role=self.tree_node.get("rpc_router_role", "hive.rpc")
 
