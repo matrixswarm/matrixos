@@ -11,16 +11,8 @@ Agents run side-by-side — not under you — operating through file-based commu
 ---
  
 ## Next drop includes:
-
-- Added matrix_websocket spki client verification
 - Added 2AUTH to swarm; ingress/egress agents (matrix_websocket, matrix_https) closed until 2auth token verified - all configurable and dynamic
-- Added "clean stale connection flags" method to matrix_websocket 
-- Full encrypted IMAP mailbox syncing (swarm-native)
-- Persistent, encrypted email storage under /matrix/universes/static/phoenix/latest/comm/<email_check>/mailbox/<mailbox_account>/cur/
-- SMTP email send from Phoenix to *any server* (on the fly)
-- Persistent reuse of universes — **no reboot needed**
-- other bug fixes
----
+
 ## 💙 Support Development
 
 If you find **MatrixOS** or the broader **MatrixSwarm ecosystem** useful and want to support ongoing updates,  
