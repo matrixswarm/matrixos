@@ -1,0 +1,15 @@
+[Unit]
+Description=MatrixSwarm OS Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/matrixd daemon --base /matrix
+Restart=always
+User=matrixswarm
+Group=matrixswarm
+WorkingDirectory=/matrix
+Environment=PYTHONPATH=/matrix
+
+[Install]
+WantedBy=multi-user.target

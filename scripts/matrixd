@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+
+import sys
+sys.path.insert(0, "/matrix")
+
+"""
+MatrixOS Unified Daemon (matrixd)
+Merged from site_boot.py and original matrixd for full directive loading,
+agent key generation, trust payload setup, and directive broadcasting
+
+"""
+import os
+import sys
+import json
+import base64
+import hashlib
+import argparse
+import psutil
+import re
+
+from pathlib import Path
+from Crypto.Cipher import AES
+from Crypto.PublicKey import RSA
+
+from core.python_core.utils.boot_guard import validate_universe_id,  enforce_single_matrix_instance
+from core.python_core.tree_parser import TreeParser
+from core.python_core.core_spawner import CoreSpawner
+from core.python_core.mixin.ghost_vault import generate_agent_keypair
+from core.python_core.utils.crypto_utils import generate_aes_key
+from core.python_core.class_lib.packet_delivery.packet.standard.general.json.packet import Packet
+from core.python_core.class_lib.packet_delivery.delivery_agent.file.json_file.delivery_agent import DeliveryAgent
+from core.python_core.class_lib.packet_delivery.utility.crypto_processors.packet_encryption_factory import packet_encryption_factory
+from core.python_core.class_lib.packet_delivery.utility.crypto_processors.football import Football
+from core.python_core.class_lib.processes.b2_bomber import B2Bomber
+
+
+def resolve_swarm_key(swarm_key_arg: str) -> bytes:
+    """
+    Accepts either:
+      1) A BASE64-encoded swarm key string
+      2) A filesystem path pointing to a file containing that key
+
+    Returns: raw bytes of the decoded key
+    """
+    # Try Base64 directly
+    try:
+        key = base64.b64decode(swarm_key_arg, validate=True)
+        if 16 <= len(key) <= 64:
+            print("[matrixd] Swarm key accepted as inline Base64.")
+            return key
+        else:
+            print(f"[matrixd] Base64 decoded but length out of range ({len(key)} bytes). Trying as file...")
+    except Exception:
+        pass  # Not Base64, fall through
+
+    # Try as file path
+    try:
+        p = Path(swarm_key_arg)
+        if not p.exists():
+            raise ValueError(f"[matrixd] swarm_key is neither valid Base64 nor a file: {swarm_key_arg}")
+
+        content = p.read_text().strip()
+        key = base64.b64decode(content, validate=True)
+        if 16 <= len(key) <= 64:
+            print(f"[matrixd] Loaded swarm key from file: {p}")
+            return key
+        raise ValueError(f"[matrixd] Key file '{p}' decoded but is wrong size ({len(key)} bytes).")
+
+    except Exception as e:
+        raise RuntimeError(str(e))
+
+    raise RuntimeError("[matrixd] FATAL: unable to resolve swarm key.")
+    return None
+
+def decrypt_directive(path: Path, swarm_key_b64: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        bubble = json.load(f)
+
+    print(f"[matrixd] Decrypting directive: {path}")
+    key = resolve_swarm_key(swarm_key_b64)
+    nonce = base64.b64decode(bubble["nonce"])
+    tag = base64.b64decode(bubble["tag"])
+    ciphertext = base64.b64decode(bubble["ciphertext"])
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+    decrypted = cipher.decrypt_and_verify(ciphertext, tag)
+    return json.loads(decrypted.decode())
+
+
+
+
+def get_all_swarm_agent_info(universe=None, base="/matrix"):
+    """
+    Scan running swarm agents and extract:
+    - universe
+    - reboot_uuid
+    - universal_id
+    - pod_path
+    - comm_path
+
+    Optional: pass a universe name to filter only that swarm.
+    """
+    pattern = re.compile(
+        r"/matrix/universes/runtime/(?P<universe>[a-zA-Z0-9_\-]+)/(?P<reboot>[0-9_]+)/pod/(?P<uuid>[a-f0-9\-]+)/run\s+--job\s+(?P<job_universe>[a-zA-Z0-9_\-]+):(?P<universal_id>[a-zA-Z0-9_\-]+)"
+    )
+
+    results = []
+
+    for proc in psutil.process_iter(['pid', 'cmdline']):
+        try:
+            cmdline = " ".join(proc.info['cmdline'])
+            match = pattern.search(cmdline)
+            if match:
+                gd = match.groupdict()
+
+                # ✅ Skip if a target universe was requested and doesn't match
+                if universe and gd["universe"] != universe:
+                    continue
+
+                if gd["universe"] != gd["job_universe"]:
+                    continue  # sanity check mismatch
+
+                runtime_root = Path(base) / "universes" / "runtime" / gd["universe"] / gd["reboot"]
+
+                results.append({
+                    "pid": proc.info['pid'],
+                    "universe": gd["universe"],
+                    "reboot_uuid": gd["reboot"],
+                    "universal_id": gd["universal_id"],
+                    "pod_path": str(runtime_root / "pod"),
+                    "comm_path": str(runtime_root / "comm"),
+                })
+        except Exception:
+            continue
+
+    return results
+
+
+def boot_universe(universe: str, args, base="/matrix", python_exec=sys.executable,
+                  directive_file=None, swarm_key=None, encryption_off=False,
+                  reboot=False, verbose=False, debug=False, rug_pull=False):
+
+    directives_dir = Path(base) / "boot_directives"
+    keys_dir = directives_dir / "keys"
+    runtime_universe_path = Path(base) / "universes" / "runtime" / universe / "latest"
+
+    runtime_universe_path.mkdir(parents=True, exist_ok=True)
+
+    if not runtime_universe_path.exists():
+        raise RuntimeError(f"[FATAL] Runtime path not found: {runtime_universe_path}")
+
+    validate_universe_id(universe)
+    if not reboot:
+        enforce_single_matrix_instance(universe)
+    os.environ["UNIVERSE_ID"] = universe
+
+    directive_path = directive_file or (directives_dir / f"{universe}.enc.json")
+
+    if isinstance(directive_path, str):
+        directive_path = Path(directive_path)
+    if not directive_path.exists():
+        print(f"[ERROR] Directive not found: {directive_path}")
+        return
+
+    swarm_key = (
+        swarm_key
+        or (keys_dir / directive_path.name.replace(".enc.json", ".key")).read_text().strip()
+    )
+
+
+    if directive_path.name.endswith(".enc.json"):
+        directive = decrypt_directive(directive_path, swarm_key)
+        print("[BOOT] Encrypted directive decrypted successfully")
+    else:
+        directive = json.loads(directive_path.read_text())
+        print("[BOOT] Loaded plaintext directive")
+
+    tp = TreeParser.load_tree_direct(directive)
+    if not tp:
+        print("[FATAL] Invalid directive structure")
+        return
+
+    print(f"[REBOOT] 💣 Full MIRV deployment initiated: {universe}")
+    target_paths = get_all_swarm_agent_info(universe=universe, base=base)
+
+    B2Bomber().level_it(target_paths)
+
+    rejected_nodes=    tp.get_rejected_nodes()
+    if rejected_nodes:
+        print(f"[RECOVERY] ⚠️ Removed duplicate nodes: {rejected_nodes}")
+
+    MATRIX_UUID = directive.get("universal_id", "matrix")
+
+    print(f"{universe}, {base}, ")
+
+    cp = CoreSpawner(universe, base, python_site=base, detected_python=python_exec, booting=True, args=args)
+
+    if verbose: cp.set_verbose(True)
+    if debug: cp.set_debug(True)
+    if rug_pull: cp.set_rug_pull(True)
+
+    matrix_keys = generate_agent_keypair()
+    matrix_pub = matrix_keys["pub"]
+    matrix_priv = matrix_keys["priv"]
+    matrix_priv_obj = RSA.import_key(matrix_priv)
+
+    matrix_key_b64 = generate_aes_key()
+
+    comm_path = cp.ensure_comm_channel(MATRIX_UUID, [{}])
+
+    tp.assign_identity_to_all_nodes(matrix_priv_obj)
+    tp.assign_identity_token_to_node('matrix', matrix_priv_obj=matrix_priv,
+                                     replace_keys={
+                                         'priv_key': matrix_priv,
+                                         'pub_key': matrix_pub,
+                                         'private_key': matrix_key_b64
+                                     })
+
+
+    # encryption is turned on here
+    mode = "encrypt"
+    if bool(encryption_off):
+        mode = "plaintext_encrypt"
+
+    matrix_node = tp.nodes.get("matrix")
+
+    fb = Football()
+    fb.set_identity_sig_verifier_pubkey(matrix_pub)
+    fb.add_identity(matrix_node['vault'],
+                    identity_name="agent_owner", #owner identity
+                    verify_universal_id=True,      #make sure the name of the agent is the same as the one in the identity
+                    universal_id="matrix",         #agent name to compare to the identity
+                    is_payload_identity=True,         #yes, this payload is an identity; used during receiving packets; this will be the senders packet
+                    sig_verifier_pubkey=matrix_pub,   #this pubkey is used to verify the identity, always Matrix's pubkey; used during sending packets
+                    is_pubkey_for_encryption=False,    #if you turn on asymmetric encryption the pubkey contained in the identity will encrypt, check payload size
+                    is_privkey_for_signing=True,       #use the privkey to sign the whole subpacket
+                    )
+
+    fb.set_use_symmetric_encryption(True)
+
+    #fb.load_identity_file(comm_path, uuid="matrix", sig_pubkey=matrix_pub)
+    #here is where we add Matrix AES Key to Encrypt and sign with Matrix Public Key
+    fb.set_verify_signed_payload(True)
+    fb.set_pubkey_verifier(matrix_pub)
+
+    #matrix identity needs to be loaded as the target, because the pubkey is used to encrypt the aes key
+    fb.load_identity_file(vault=matrix_node['vault'], universal_id='matrix')
+    fb.set_aes_encryption_pubkey(matrix_pub)
+    agent = DeliveryAgent()
+    agent.set_crypto_handler(packet_encryption_factory(mode, fb))
+    pk = Packet()
+    pk.set_data({'agent_tree': tp.root})
+    agent.set_location({"path": comm_path}) \
+        .set_packet(pk) \
+        .set_identifier("agent_tree_master") \
+        .set_address(["directive"]) \
+        .deliver()
+
+    full_cmdline = " ".join(sys.argv)
+    trust_payload = {
+        "encryption_enabled": int(not encryption_off),
+        "pub": matrix_pub,
+        "priv": matrix_priv,
+        "swarm_key": swarm_key,
+        # this swarm key is different then the one used to encrypt the directive, if encrypted
+        "private_key": matrix_key_b64,
+        "matrix_pub": matrix_pub,
+        "matrix_priv": matrix_priv,
+        "security_box": {"reboot": full_cmdline},
+    }
+    cp.set_keys(trust_payload)
+
+
+    matrix_node['children'] = []
+    new_uuid, pod_path = cp.create_runtime()
+    cp.spawn_agent(universe, "site_boot", MATRIX_UUID, MATRIX_UUID, new_uuid, matrix_node)
+
+    print(f"[✅] Matrix deployed at: {pod_path}")
+    print(f"[🧠] Swarm online :: {MATRIX_UUID} :: fingerprint: {hashlib.sha256(matrix_pub.encode()).hexdigest()[:12]}")
+
+def main():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="cmd")
+
+    boot = sub.add_parser("boot")
+    boot.add_argument("--universe", required=True, help="Target universe name (directory under /matrix/universes).")
+    boot.add_argument("--directive", help="Optional path to a specific directive JSON to override vault default.")
+    boot.add_argument("--base", default="/matrix", help="Base installation path for MatrixSwarm (default: /matrix).")
+    boot.add_argument("--python-exec", default=sys.executable, help="Python interpreter to use when spawning agents.")
+    boot.add_argument("--swarm_key", help="Base64-encoded swarm AES key. Required if encryption is enabled.")
+    boot.add_argument("--encryption-off", action="store_true", help="Disable swarm encryption; all comms/logs written as plaintext.")
+    boot.add_argument("--reboot", action="store_true", help="Restart agents in the current universe without full reinit.")
+    boot.add_argument("--verbose", action="store_true", help="Enable stdout logging for spawned agents.")
+    boot.add_argument("--debug", action="store_true", help="Enable verbose internal debugging output.")
+    boot.add_argument("--rug-pull", action="store_true", help="Force rug-pull mode (agents terminate after boot).")
+    boot.add_argument("--clean", action="store_true", help="Purge all runtime directories before booting.")
+    boot.add_argument("--reboot-new", action="store_true", help="Force creation of a new reboot UUID (fresh timestamp).")
+    boot.add_argument("--reboot-id", help="Resume a specific previous reboot UUID (timestamp directory).")
+
+    # subcommands
+    sub.add_parser("list").add_argument("--base", default="/matrix", help="List existing universes under the given base path.")
+    kill = sub.add_parser("kill")
+    kill.add_argument("--universe", required=True, help="Universe to terminate.")
+    kill.add_argument("--base", default="/matrix", help="Base path for MatrixSwarm universes.")
+    kill.add_argument("--cleanup", action="store_true", help="After kill, remove old runtime directories for that universe.")
+
+    args = parser.parse_args()
+    if args.cmd == "boot":
+        boot_universe(
+            universe=args.universe,
+            args=args,
+            base=args.base,
+            python_exec=args.python_exec,
+            directive_file=args.directive,
+            swarm_key=args.swarm_key,
+            encryption_off=args.encryption_off,
+            reboot=args.reboot,
+            verbose=args.verbose,
+            debug=args.debug,
+            rug_pull=args.rug_pull
+        )
+    elif args.cmd == "list":
+        list_universes(args.base)
+    elif args.cmd == "kill":
+        kill_universe(args.base, args.universe, args.cleanup)
+    else:
+        parser.print_help()
+
+
+def list_universes(base="/matrix"):
+    infos = get_all_swarm_agent_info(universe=None, base=base)
+    if not infos:
+        print("[LIST] No active swarm agents found")
+        return
+
+    universes = {}
+    for info in infos:
+        universes.setdefault(info["universe"], []).append(info)
+
+    for universe, agents in universes.items():
+        total_rss = total_cpu = 0
+        for proc in psutil.process_iter(['pid', 'memory_info', 'cpu_percent', 'cmdline']):
+            try:
+                cmdline_list = proc.info.get('cmdline')
+                if not cmdline_list:
+                    continue
+                cmdline = " ".join(cmdline_list)
+                if f"--job {universe}:" in cmdline:
+                    total_rss += proc.info['memory_info'].rss
+                    total_cpu += proc.info['cpu_percent']
+            except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError):
+                continue
+
+        print(f"🌌 {universe} :: {len(agents)} agents, {total_rss/1024/1024:.1f} MB RAM, {total_cpu:.1f}% CPU")
+        for agent in agents:
+            print(f" └── PID {agent['pid']} :: {agent['universal_id']}")
+
+
+def kill_universe(base, universe, cleanup=False):
+    runtime_base = Path(base) / "universes" / "runtime" / universe
+    static_base = Path(base) / "universes" / "static" / universe
+
+    # Always resolve latest symlink
+    latest = runtime_base / "latest"
+    if not latest.is_symlink():
+        print(f"[KILL][ERROR] No latest symlink found for {universe}")
+        return
+
+    target_boot = runtime_base / latest.readlink()
+    pod_path = target_boot / "pod"
+    comm_path = target_boot / "comm"
+
+    print(f"[KILL] Target Universe: {universe}")
+    print(f"[KILL] Runtime Path: {target_boot}")
+    print(f"[KILL] Pod Path: {pod_path}")
+    print(f"[KILL] Comm Path: {comm_path}")
+
+    print(f"[REBOOT] 💣 Full MIRV deployment initiated: {universe}")
+    target_paths = get_all_swarm_agent_info(universe=universe, base=base)
+
+    B2Bomber().level_it(target_paths)
+
+    if cleanup:
+        print(f"[SWARM-CLEANER] Running cleanup for universe '{universe}'...")
+        # Clean all but latest in runtime/static
+        for subdir in [runtime_base, static_base]:
+            boots = [d for d in subdir.iterdir() if d.is_dir() and d.name != "latest"]
+            boots_sorted = sorted(boots, key=lambda p: p.name)
+            for old in boots_sorted[:-1]:
+                print(f"[CLEANUP] Removing old boot: {old}")
+                os.system(f"rm -rf '{old}'")
+
+if __name__ == "__main__":
+    main()
