@@ -1,114 +1,149 @@
-import sys
-import os
-import time
-import subprocess
-import threading
-from threading import Event
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
+import sys, os
+sys.path.insert(0, os.getenv("SITE_ROOT"))
+sys.path.insert(0, os.getenv("AGENT_PATH"))
 
-try:
-    import pyinotify
-    WATCHER_BACKEND = 'inotify'
-except ImportError:
-    from watchdog.observers import Observer
-    from watchdog.events import FileSystemEventHandler
-    WATCHER_BACKEND = 'watchdog'
 
-# BootAgent base class
+import os, time, subprocess, json, hashlib
 from core.python_core.boot_agent import BootAgent
+from core.python_core.utils.swarm_sleep import interruptible_sleep
+from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
+
 
 class Agent(BootAgent):
     def __init__(self):
         super().__init__()
-        # Load configuration from directive
-        cfg = self.tree_node.get("config", {}) if hasattr(self, 'tree_node') else {}
-        self.watch_path = cfg.get("watch_path", "/sync/")
-        self.remote_host = cfg.get("remote_host", "example.com")
-        self.remote_path = cfg.get("remote_path", "/remote/backup/")
-        self.ssh_opts = cfg.get("ssh_opts", "")
-        self.rsync_opts = cfg.get("rsync_opts", "-az --delete")
-        self.debounce_seconds = float(cfg.get("debounce_seconds", 1.0))
+        try:
+            self.AGENT_VERSION = "1.0.0"
 
-        # Observer control
-        self.stop_event = Event()
+            cfg = self.tree_node.get("config", {})
 
-    def post_boot(self):
-        self.log(f"[RSYNC][BOOT] Backend={WATCHER_BACKEND} Watching {self.watch_path} → {self.remote_host}:{self.remote_path}")
+            self.watch_path = cfg.get("watch_path", "/matrix/sora/outbox")
+            self.ssh_host = cfg.get("ssh_host")
+            self.ssh_port = int(cfg.get("ssh_port", 22))
+            self.ssh_user = cfg.get("ssh_user")
+            self.remote_path = cfg.get("ssh_path")
+            self.auth_type = cfg.get("auth_type")
+            self.private_key = cfg.get("private_key")
+            self.password = cfg.get("password")
 
-        if WATCHER_BACKEND == 'inotify':
-            self._start_inotify()
+            self.poll_interval = int(cfg.get("poll_interval", 10))
+
+            os.makedirs(self.watch_path, exist_ok=True)
+
+            # delivery DB
+            self.db_path = os.path.join(self.path_resolution["comm_path_resolved"],
+                                        "sora_delivered.json")
+            self.delivered = self._load_db()
+
+            self._emit_beacon = self.check_for_thread_poke(
+                "worker", timeout=self.poll_interval * 2, emit_to_file_interval=10
+            )
+
+        except Exception as e:
+            self.log(error=e, block="init")
+
+    # ---------------------------------------------------------
+    def _load_db(self):
+        try:
+            if os.path.exists(self.db_path):
+                return json.load(open(self.db_path))
+        except:
+            pass
+        return {}
+
+    def _save_db(self):
+        try:
+            with open(self.db_path, "w") as f:
+                json.dump(self.delivered, f, indent=2)
+        except Exception as e:
+            self.log("[SORA][DB][ERROR]", error=e)
+
+    # ---------------------------------------------------------
+    def _file_hash(self, path):
+        try:
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                while chunk := f.read(65536):
+                    h.update(chunk)
+            return h.hexdigest()
+        except:
+            return "unknown"
+
+    # ---------------------------------------------------------
+    def _rsync_file(self, local_file):
+        remote = f"{self.ssh_user}@{self.ssh_host}:{self.remote_path}"
+
+        if self.auth_type == "priv":
+            cmd = [
+                "rsync", "-avz", "-e",
+                f"ssh -p {self.ssh_port} -i {self.private_key}",
+                local_file, remote
+            ]
         else:
-            self._start_watchdog()
+            # password authentication (sshpass)
+            cmd = [
+                "sshpass", "-p", self.password,
+                "rsync", "-avz", "-e",
+                f"ssh -p {self.ssh_port}",
+                local_file, remote
+            ]
 
-    def shutdown(self):
-        self.stop_event.set()
-        super().shutdown()
+        self.log(f"[SORA][RSYNC] {' '.join(cmd)}")
+        res = subprocess.run(cmd, capture_output=True, text=True)
 
-    def _run_rsync(self):
-        cmd = [
-            'rsync',
-            *self.rsync_opts.split(),
-            '-e', f"ssh {self.ssh_opts}",
-            os.path.join(self.watch_path, ''),
-            f"{self.remote_host}:{self.remote_path}"
-        ]
-        self.log(f"[RSYNC] Executing: {' '.join(cmd)}")
+        if res.returncode != 0:
+            self.log(f"[SORA][ERROR] rsync failed: {res.stderr}")
+            return False
+
+        self.log("[SORA] Upload complete.")
+        return True
+
+    # ---------------------------------------------------------
+    def worker(self, config=None, identity: IdentityObject = None):
         try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            self.log(f"[RSYNC] Success: {result.stdout.strip()}")
-        except subprocess.CalledProcessError as e:
-            self.log(f"[RSYNC][ERROR] {e.stderr.strip()}")
+            self._emit_beacon()
 
-    # Watchdog implementation
-    def _start_watchdog(self):
-        class Handler(FileSystemEventHandler):
-            def __init__(self, agent):
-                self.agent = agent
-                self._timer = None
-            def on_any_event(self, event):
-                if self._timer and self._timer.is_alive():
-                    self._timer.cancel()
-                self._timer = threading.Timer(self.agent.debounce_seconds, self.agent._run_rsync)
-                self._timer.start()
+            # check for config updates
+            if config and isinstance(config, dict):
+                self.watch_path = config.get("watch_path", self.watch_path)
+                self.remote_path = config.get("ssh_path", self.remote_path)
+                self.ssh_host = config.get("ssh_host", self.ssh_host)
+                self.ssh_user = config.get("ssh_user", self.ssh_user)
+                self.ssh_port = int(config.get("ssh_port", self.ssh_port))
+                self.auth_type = config.get("auth_type", self.auth_type)
+                self.private_key = config.get("private_key", self.private_key)
+                self.password = config.get("password", self.password)
+                self.poll_interval = int(config.get("poll_interval", self.poll_interval))
 
-        observer = Observer()
-        observer.schedule(Handler(self), self.watch_path, recursive=True)
-        observer.start()
-        try:
-            while not self.stop_event.is_set():
-                time.sleep(1)
-        finally:
-            observer.stop()
-            observer.join()
-            self.log("[RSYNC][SHUTDOWN] Watchdog stopped.")
+            for fname in os.listdir(self.watch_path):
+                if not fname.lower().endswith((".mp4", ".webm", ".mov", ".mkv")):
+                    continue
 
-    # Inotify implementation
-    def _start_inotify(self):
-        wm = pyinotify.WatchManager()
-        mask = pyinotify.IN_CREATE | pyinotify.IN_MODIFY | pyinotify.IN_DELETE | pyinotify.IN_MOVED_FROM | pyinotify.IN_MOVED_TO
+                fpath = os.path.join(self.watch_path, fname)
 
-        class EventHandler(pyinotify.ProcessEvent):
-            def __init__(self, agent):
-                self.agent = agent
-                self._timer = None
+                h = self._file_hash(fpath)
+                if h in self.delivered:
+                    continue
 
-            def process_default(self, event):
-                # Debounce multiple events
-                if self._timer and self._timer.is_alive():
-                    self._timer.cancel()
-                self._timer = threading.Timer(self.agent.debounce_seconds, self.agent._run_rsync)
-                self._timer.start()
+                self.log(f"[SORA] New file detected: {fname}")
 
-        handler = EventHandler(self)
-        notifier = pyinotify.Notifier(wm, handler)
-        wm.add_watch(self.watch_path, mask, rec=True)
-        try:
-            while not self.stop_event.is_set():
-                notifier.process_events()
-                if notifier.check_events(timeout=1000):
-                    notifier.read_events()
-        finally:
-            notifier.stop()
-            self.log("[RSYNC][SHUTDOWN] Inotify stopped.")
+                if self._rsync_file(fpath):
+                    self.delivered[h] = {
+                        "file": fname,
+                        "hash": h,
+                        "timestamp": int(time.time())
+                    }
+                    self._save_db()
+
+                    # swarm alert
+                    self.alert_operator(f"SORA upload complete → {fname}")
+
+        except Exception as e:
+            self.log("[SORA][ERROR]", error=e)
+
+        interruptible_sleep(self, self.poll_interval)
+
 
 if __name__ == "__main__":
     agent = Agent()

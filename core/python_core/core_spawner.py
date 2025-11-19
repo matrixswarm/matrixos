@@ -93,6 +93,9 @@ class CoreSpawner(CoreSpawnerSecureMixin):
             {"name": "config", "type": "d", "content": None, "meta": "Updated configs go here"},
         ]
 
+        self.pm = None
+
+        #called from boot_agent
         if not bool(booting):
 
             self.pm = PathManager(universe, base_path, reboot_uuid)
@@ -101,27 +104,20 @@ class CoreSpawner(CoreSpawnerSecureMixin):
 
             universe_root = Path(base_path) / "universes" / "runtime" / universe
 
-            # determine which mode applies
-            if args.reboot_id:
-                self.pm = PathManager(universe, base_path, reboot_uuid=args.reboot_id, mode="resume")
-                self._cleanup()  # remove incoming/die and/or incoming/punji
-                print(f"[SPAWNER] Resuming reboot UUID: {args.reboot_id}")
+            # if neither option set args.reboot_id or not args.reboot_new
+            if not args.reboot_id and not args.reboot_new:
 
-            elif args.reboot_new:
-                self.pm = PathManager(universe, base_path, mode="new")
-                print(f"[SPAWNER] New reboot_uuid: {self.pm.reboot_uuid}")
-
-            else:
 
                 # try to reuse latest
                 candidates = [
                     p.name for p in universe_root.iterdir()
                     if p.is_dir() and p.name.replace("_", "").isdigit()
                 ]
+
                 if candidates:
                     latest_uuid = sorted(candidates)[-1]
                     self.pm = PathManager(universe, base_path, reboot_uuid=latest_uuid, mode="reuse")
-                    self._cleanup() #remove incoming/die and/or incoming/punji
+                    self._cleanup()  # remove incoming/die and/or incoming/punji
                     print(f"[SPAWNER] ♻️ Reusing latest reboot_uuid: {latest_uuid}")
                     # clean old pods before continuing
                     pod_path = Path(self.pm.session.runtime_pod_path)
@@ -131,6 +127,18 @@ class CoreSpawner(CoreSpawnerSecureMixin):
                                 shutil.rmtree(pod, ignore_errors=True)
                         print(f"[SPAWNER] 🧹 Cleared stale pods in {pod_path}")
 
+            #reuse a given reboot_uuid
+            elif args.reboot_id:
+
+                self.pm = PathManager(universe, base_path, reboot_uuid=args.reboot_id, mode="resume")
+                self._cleanup()  # remove incoming/die and/or incoming/punji
+                print(f"[SPAWNER] Resuming reboot UUID: {args.reboot_id}")
+
+
+            #fallback to newboot
+            if not isinstance(self.pm, PathManager):
+                self.pm = PathManager(universe, base_path, mode="new")
+                print(f"[SPAWNER] New reboot_uuid: {self.pm.reboot_uuid}")
 
             # handle --clean
             if args.clean:

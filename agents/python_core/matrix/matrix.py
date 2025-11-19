@@ -33,6 +33,7 @@ import json
 import base64
 import secrets
 from Crypto.PublicKey import RSA
+import subprocess
 
 # Assuming self.matrix_priv is currently a string with PEM content:
 from core.python_core.boot_agent import BootAgent
@@ -1648,6 +1649,16 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
         except Exception as e:
             self.log("[DELIVER-TREE][ERROR]", error=e)
 
+    def _cmd_matrix_reloaded(self, content, packet, identity=None):
+
+        cmd = self.security_box.get("reboot","")
+        if not cmd:
+            self.log("[REBOOT][ERROR] No preserved launch command found.")
+            return
+
+        self.log(f"[REBOOT] Relaunching universe with: {cmd}")
+        subprocess.Popen(cmd, shell=True)
+        os._exit(0)
 
 if __name__ == "__main__":
     agent = Agent()

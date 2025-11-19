@@ -77,6 +77,11 @@ class Agent(BootAgent):
             self._interval = int(cfg.get("interval_sec", 30))
             self._poll_interval = int(cfg.get("poll_interval", 300))
 
+            #hard timeout
+            socket.setdefaulttimeout(15)
+
+            self._force_poll_now=False
+
             self.active_mail_sessions = {}
             self._signing_keys = cfg.get('security').get('signing')
 
@@ -102,7 +107,8 @@ class Agent(BootAgent):
             self._poll_thread = None
 
             self._emit_beacon = self.check_for_thread_poke("worker", timeout=self._interval * 2, emit_to_file_interval=10)
-            
+            self.beacon_imap_poll = self.check_for_thread_poke("imap_poll_inner", timeout=self._poll_interval * 2, emit_to_file_interval=10)
+
             self._swarm_feed_alert_role = cfg.get("swarm_feed_alert_role", "swarm_feed.alert")
             self._rpc_role = cfg.get("rpc_router_role", "hive.rpc")
 
@@ -254,20 +260,25 @@ class Agent(BootAgent):
 
     # ---------- message store (encrypted blobs) ----------
     def _stage_encrypt_store(self, serial: str, uuid_str: str, raw_bytes: bytes) -> str:
-        paths = self._acct_paths(serial)
-        tmpf = os.path.join(paths["tmp"], f"{uuid_str}.eml")
-        curf = os.path.join(paths["cur"], f"{uuid_str}.eml.aes")
-        with open(tmpf, "wb") as f:
-            f.write(raw_bytes)
-            f.flush()
-            os.fsync(f.fileno())
-        ct = self._aes.encrypt(raw_bytes)
-        with open(curf, "wb") as f:
-            f.write(ct)
-            f.flush()
-            os.fsync(f.fileno())
-        os.remove(tmpf)
-        return curf
+
+        try:
+            paths = self._acct_paths(serial)
+            tmpf = os.path.join(paths["tmp"], f"{uuid_str}.eml")
+            curf = os.path.join(paths["cur"], f"{uuid_str}.eml.aes")
+            with open(tmpf, "wb") as f:
+                f.write(raw_bytes)
+                f.flush()
+                os.fsync(f.fileno())
+            ct = self._aes.encrypt(raw_bytes)
+            with open(curf, "wb") as f:
+                f.write(ct)
+                f.flush()
+                os.fsync(f.fileno())
+            os.remove(tmpf)
+            return curf
+
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
 
     def _read_uuid(self, serial: str, uuid_str: str) -> bytes:
         curf = os.path.join(self._acct_paths(serial)["cur"], f"{uuid_str}.eml.aes")
@@ -283,8 +294,10 @@ class Agent(BootAgent):
         pwd = cfg.get("incoming_password")
 
         try:
+
+
             if enc in ("SSL", "TLS", "IMAPS", "SSL/TLS"):
-                client = imaplib.IMAP4_SSL(host, port)
+                client = imaplib.IMAP4_SSL(host, port, )
             else:
                 client = imaplib.IMAP4(host, port)
             if enc == "STARTTLS":
@@ -354,13 +367,15 @@ class Agent(BootAgent):
           • Remove orphaned local files not in meta
           • Sync with IMAP and optionally delete remote messages after fetch
         """
-        meta = self._load_meta(serial)
-        imap = None
-        new_count = 0
-        deleted_count = 0
-        nuked_orphans = 0
 
         try:
+
+            meta = self._load_meta(serial)
+            imap = None
+            new_count = 0
+            deleted_count = 0
+            nuked_orphans = 0
+
             imap = self._imap_connect(cfg)
             folders = cfg.get("folders") or ["INBOX"]
             if folders == ["*"]:
@@ -370,6 +385,7 @@ class Agent(BootAgent):
             cur_dir = acct_path["cur"]
             del_dir = os.path.join(acct_path["acct"], "del")
             os.makedirs(del_dir, exist_ok=True)
+
 
             # === Phase 1: Cleanup stale markers ===
             for fname in list(os.listdir(del_dir)):
@@ -420,6 +436,7 @@ class Agent(BootAgent):
                                 del meta["imap"][folder][uid]
                                 break
 
+
                         # delete file
                         curf = os.path.join(cur_dir, f"{uuid_str}.eml.aes")
                         if os.path.exists(curf):
@@ -434,6 +451,7 @@ class Agent(BootAgent):
                             if rec.get("uuid") == uuid_str:
                                 del meta["imap"][folder][uid]
                                 break
+
                         self._save_meta(serial, meta)
 
                         # remove marker
@@ -508,6 +526,7 @@ class Agent(BootAgent):
                 except Exception:
                     pass
 
+
             meta["last_sync"] = int(time.time())
             self._save_meta(serial, meta)
 
@@ -537,15 +556,19 @@ class Agent(BootAgent):
                 pass
 
     def _poll_all_accounts_once(self, serial: Optional[str] = None) -> Dict[str, Any]:
-        if serial:
-            cfg = self.accounts.get(serial)
-            if not cfg:
-                return {"status": "error", "error": "unknown_serial", "detail": serial}
-            return self._poll_account_once(serial, cfg)
-        results = {}
-        for s, cfg in self.accounts.items():
-            results[s] = self._poll_account_once(s, cfg)
-        return {"status": "ok", "results": results}
+
+        try:
+            if serial:
+                #this is a request to list messages from an box
+                cfg = self.accounts.get(serial)
+                if not cfg:
+                    return {"status": "error", "error": "unknown_serial", "detail": serial}
+                return self._poll_account_once(serial, cfg)
+            results = {}
+            for s, cfg in self.accounts.items():
+                results[s] = self._poll_account_once(s, cfg)
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
 
     # ---------- command surface ----------
     def cmd_list_folders(self, content, packet, identity=None):
@@ -625,15 +648,22 @@ class Agent(BootAgent):
         self.callback.dispatch(ctx, payload)
 
     def cmd_check_email(self, content, packet, identity=None) :
-        payload = content or {}
-        return self._poll_all_accounts_once(payload.get("serial"))
+        try:
+            serial = content.get("serial")
+            self.log(f"Checking email for account {serial}...")
+            #self._poll_all_accounts_once(serial)
+            self._force_poll_now = True
+            self.log(f"Email check complete for account {serial}...")
+        except Exception as e:
+            self.log(error=e)
 
     def cmd_retrieve_email(self, content, packet, identity=None):
         try:
+
             serial = content.get("serial")
             uuid_ = content.get("uuid")
             session_id = content.get("session_id")
-
+            self.log(f"Retrieving email {uuid_} from account {serial}...")
             raw_bytes = self._read_uuid(serial, uuid_)
             parser = EmailParser()
             parsed = parser.parse(raw_bytes)
@@ -653,6 +683,7 @@ class Agent(BootAgent):
                 "attachments": parsed["attachments"],
             }
 
+            self.log(f"Email check complete for email {uuid_} from account {serial}...")
             # dispatch to Phoenix (pre-encryption) as you already do
             ctx = self.callback.ctx
             ctx.set_response_handler("check_mail.cmd_retrieve_email")
@@ -705,8 +736,8 @@ class Agent(BootAgent):
 
             try:
                 # Kick off a background cleanup for that account
-                threading.Thread(target=self._poll_account_once, args=(serial, self.accounts[serial]), daemon=True).start()
-                self.log(f"[EMAIL_CHECK] 🧹 Triggered immediate cleanup for {serial}")
+                self._force_poll_now = True
+                self.log(f"[EMAIL_CHECK] Triggered immediate cleanup for {serial}")
             except Exception as e:
                 self.log(f"[EMAIL_CHECK][ERROR] Failed to trigger immediate cleanup for {serial}: {e}")
 
@@ -824,23 +855,39 @@ class Agent(BootAgent):
             self.log(f"[EMAIL_CHECK] ✅ Updated accounts.json.aes from Phoenix with {len(new_data)} account(s).")
             return {"status": "ok", "updated": len(new_data)}
         except Exception as e:
-            self.log("[EMAIL_CHECK][UPDATE-CONNECTIONS][ERROR]", error=e)
+            self.log(error=e, block="main_try", level="ERROR")
 
     def _poll_loop(self):
-        beacon = self.check_for_thread_poke("imap_poll", timeout=60, emit_to_file_interval=10)
-        beacon_imap_poll = self.check_for_thread_poke("imap_poll_inner", timeout=self._poll_interval *2, emit_to_file_interval=10)
-        last_poll = 0
-        while self.running:
-            beacon()
-            now = time.time()
-            if now - last_poll >= self._poll_interval:
-                beacon_imap_poll()
+        try:
+
+            last_poll = 0
+
+            while self.running:
+
+                now = time.time()
                 try:
-                    self._safe_poll_all_accounts_once()
-                except Exception as e:
-                    self.log(f"[POLL-ERROR] {e}")
-                last_poll = now
-            time.sleep(2)
+                    if self._force_poll_now or (now - last_poll >= float(self._poll_interval)):
+
+                        self._force_poll_now = False
+
+                        self.beacon_imap_poll()
+
+                        try:
+                            self._safe_poll_all_accounts_once()
+                        except Exception as e:
+                            self.log(f"[EMAIL_CHECK][POLL-ERROR] {e}", block="_safe_poll_all_accounts_once",
+                                     level="ERROR")
+
+                        last_poll = now
+
+                except Exception as loop_error:
+                    self.log(f"[EMAIL_CHECK][LOOP-ERROR] {loop_error}", block="_poll_loop", level="ERROR")
+
+                time.sleep(2)
+
+        except Exception as fatal:
+            # This will show you the REAL root exception that killed the thread
+            self.log(f"[EMAIL_CHECK][FATAL-POLL-LOOP-DEATH] {fatal}", block="_poll_loop", level="ERROR")
 
     def _safe_poll_all_accounts_once(self):
         with self._accounts_lock:
