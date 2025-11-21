@@ -45,41 +45,34 @@ class Agent(BootAgent):
         except Exception as e:
             self.log("Failed to initialize config", error=e)
 
-    def worker(self,config:dict=None, identity:IdentityObject = None):
-
+    def worker(self, config: dict = None, identity: IdentityObject = None):
         try:
             self._emit_beacon()
-
             if config and isinstance(config, dict):
-                self.log(f"config loaded: {config}")
-
-                if config.get("partial_config"):
-                    config = config.copy()  # avoid mutating the caller’s dict
-                    config.pop("partial_config", None)
-                    self._private_config.update(config)
-                    self.log("[WORKER] 🧩 Partial config merged.")
-                else:
-                    self._private_config = config
-                    self.log("[WORKER] 🔁 Full config applied.")
-
+                self._private_config.update(config)
                 self._initialized_from_tree = False
 
             if not self._initialized_from_tree:
                 self.cmd_update_agent_config()
 
-            if not self._private_config.get("active", True):
-                self.log("🔇 Agent marked inactive. Exiting cycle.")
+            watch_list = self._private_config.get("watch_list", [])
+            if not watch_list:
+                self.log("No watch_list configured; standing by.")
+                interruptible_sleep(self, self.interval)
+                return
 
-            else:
+            if not hasattr(self, "_state"):
+                self._state = {}
 
-                trigger = self._private_config.get("trigger_type", "price_change_above")
+            for watch in watch_list:
+                pair = watch.get("pair", "BTC/USDT")
+                trigger_type = watch.get("trigger_type", "price_change_above")
+                self._private_config.update(watch)  # temporarily load
+                self._last_price = self._state.get(pair, {}).get("last_price")
 
-                # Break it into base + direction (e.g., price_change_above → price_change + above)
-                if "_" in trigger:
-                    base_trigger, direction = trigger.rsplit("_", 1)
-                else:
-                    base_trigger = trigger
-                    direction = "above"
+                base_trigger, direction = (
+                    trigger_type.rsplit("_", 1) if "_" in trigger_type else (trigger_type, "above")
+                )
 
                 if base_trigger == "price_change":
                     self._run_price_change_monitor(direction)
@@ -90,7 +83,9 @@ class Agent(BootAgent):
                 elif base_trigger == "asset_conversion":
                     self._run_asset_conversion_check()
                 else:
-                    self.log(f"[UNKNOWN TRIGGER] {trigger}")
+                    self.log(f"[UNKNOWN TRIGGER] {trigger_type}")
+
+                self._state[pair] = {"last_price": self._last_price}
 
         except Exception as e:
             self.log(error=e, block="main_try")

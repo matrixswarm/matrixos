@@ -1359,7 +1359,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             #this block is basically only given to a sentinel, that's the only one that would need this
             #len of keychain["security_box"] is checked because multiple iterations will cause it
             #to be overridden
-            if bool(cfg.get("matrix_secure_verified")) and len(keychain["security_box"])==0:
+            if bool(cfg.get("matrix_secure_verified")) and len(keychain["security_box"])==1:
                 self.log("[TRUST] matrix_secure_verified: TRUE → injecting real Matrix private key.")
                 keychain["security_box"]["encryption_enabled"] = int(self.encryption_enabled)
                 keychain["security_box"]["matrix_priv"] = self.matrix_priv

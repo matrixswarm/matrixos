@@ -28,7 +28,7 @@ class Agent(BootAgent):
             self.api_key = cfg.get("api_key")
             self.model = cfg.get("model", "gpt-sora-1")
             self.resolution = cfg.get("resolution", "1920x1080")
-            self.poll_interval = int(cfg.get("poll_interval", 4))
+            self.poll_interval = int(cfg.get("poll_interval", 60))
 
             self._cfg_lock = threading.Lock()
             self.client = OpenAI(api_key=self.api_key)
@@ -49,9 +49,7 @@ class Agent(BootAgent):
             os.makedirs(self.outbox_dir, exist_ok=True)
 
             self._last_config = {}
-            self._emit_beacon = self.check_for_thread_poke(
-                "worker", timeout=self.poll_interval * 2, emit_to_file_interval=10
-            )
+            self._emit_beacon = self.check_for_thread_poke("worker", timeout=self.poll_interval * 2, emit_to_file_interval=10)
 
         except Exception as e:
             self.log("[SORA][INIT][ERROR]", error=e)
