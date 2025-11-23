@@ -43,15 +43,6 @@ class Agent(BootAgent):
                 swarm_key = ENCRYPTION_CONFIG.get_swarm_key()
                 self.key_bytes = base64.b64decode(swarm_key)
 
-            self._signing_keys = self.tree_node.get('config', {}).get('security', {}).get('signing', {})
-            self._has_signing_keys = bool(self._signing_keys.get('privkey')) and bool( self._signing_keys.get('remote_pubkey'))
-
-            if self._has_signing_keys:
-                priv_pem = self._signing_keys.get("privkey")
-                priv_pem = pem_fix(priv_pem)
-                self._signing_key_obj = RSA.import_key(priv_pem.encode() if isinstance(priv_pem, str) else priv_pem)
-
-            self._serial_num = self.tree_node.get('serial', {})
         except Exception as e:
             self.log(error=e, block="main_try")
 
@@ -261,53 +252,43 @@ class Agent(BootAgent):
         return True
 
     def _broadcast_log_lines(self, token: str, target: str, sess: str, offset: int, lines: list):
+        """
+        Streams rendered log lines to Phoenix via crypto_reply.
+        Uses BootAgent's unified callback for signing and dispatch.
+        """
         try:
-
-            self.log(f"🚨 ENTERED _broadcast_log_lines: sess={sess}, lines={len(lines)}", level="INFO")
-
-            endpoints = self.get_nodes_by_role(self.rpc_role, return_count=1)
-            if not endpoints:
-                self.log("No hive.rpc-compatible agents found for 'hive.rpc'.")
+            if not lines:
                 return
 
-            remote_pub_pem = self._signing_keys.get("remote_pubkey")
+            return_handler = self.active_streams.get(sess, {}).get(
+                "return_handler", "agent_log_view.update"
+            )
 
-            return_handler = self.active_streams.get(sess, {}).get("return_handler", "agent_log_view.update")
             payload = {
-                "handler": return_handler,
-                "content":{
-                    "universal_id": target,
-                    "session_id": sess,
-                    "token": token,
-                    "start_line": offset,
-                    "lines": lines,
-                    "next_offset": offset + len(lines),
-                    "timestamp": int(time.time()),
-                }
-            }
-            sealed = encrypt_with_ephemeral_aes(payload, remote_pub_pem)
-            content = {
-                "serial": self._serial_num,
-                "content": sealed,
+                "universal_id": target,
+                "session_id": sess,
+                "token": token,
+                "start_line": offset,
+                "lines": lines,
+                "next_offset": offset + len(lines),
                 "timestamp": int(time.time()),
             }
-            sig = sign_data(content, self._signing_key_obj)
-            content["sig"] = sig
 
-            pk1 = self.get_delivery_packet("standard.command.packet")
-            pk1.set_data({
-                "handler": "dummy_handler", #if a handler isn't set the packet will not set, without a handler
-                "origin": self.command_line_args['universal_id'],
-                "session_id": sess,
-                "content": content,
-            })
+            # Send securely via BootAgent's crypto pipeline
+            self.crypto_reply(
+                response_handler=return_handler,
+                payload=payload,
+                session_id=sess,
+                token=token,
+                rpc_role=self.rpc_role
+            )
 
-            for ep in endpoints:
-                pk1.set_payload_item("handler", ep.get_handler())
-                self.pass_packet(pk1, ep.get_universal_id())
+            if self.debug.is_enabled():
+                self.log(f"[LOG_STREAMER] Sent {len(lines)} lines to {return_handler} (sess={sess})")
 
         except Exception as e:
             self.log("[LOG_STREAMER][ERROR] Failed to broadcast log lines", error=e)
+
 
 if __name__ == "__main__":
     agent = Agent()

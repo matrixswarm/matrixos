@@ -24,6 +24,9 @@ from core.python_core.class_lib.logging.logger import Logger
 from core.python_core.class_lib.packet_delivery.mixin.packet_factory_mixin import PacketFactoryMixin
 from core.python_core.class_lib.packet_delivery.mixin.packet_delivery_factory_mixin import PacketDeliveryFactoryMixin
 from core.python_core.class_lib.packet_delivery.mixin.packet_reception_factory_mixin import PacketReceptionFactoryMixin
+from core.python_core.class_lib.gui.callback_dispatcher import CallbackCtx, PhoenixCallbackDispatcher
+from core.python_core.utils.crypto_utils import pem_fix
+from Crypto.PublicKey import RSA
 from core.python_core.class_lib.packet_delivery.utility.encryption.config import ENCRYPTION_CONFIG
 from core.python_core.class_lib.packet_delivery.utility.encryption.config import EncryptionConfig
 from core.python_core.utils.debug.config import DebugConfig
@@ -162,7 +165,6 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             private_key=self.private_key
         )
 
-
         #this option will be pulled from the command line as debug
         #all packets all directives, using the self.swarm_key
         self.packet_encryption=True
@@ -182,7 +184,7 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
         debug = bool(self.command_line_args.get('debug',0))
 
-        #don't need to use a singleton
+        #decapitate the pod run file; 1=yes or 0=no?
         self.rug_pull = bool(self.command_line_args.get('rug_pull', 0))
 
         self.debug.set_enabled(enabled = debug)
@@ -223,6 +225,10 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
         self.running = False
         self.NAME = self.command_line_args.get("agent_name", "UNKNOWN")
+
+
+        self.initialize_callback_dispatcher()
+
 
         '''
         fb.add_identity(matrix_node['vault'],
@@ -362,6 +368,126 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             self.log(f"{prefix} {message}", level=level)
         except Exception as e:
             print(f"[LOG-PROTO-FAIL] {e}")
+
+    def initialize_callback_dispatcher(self):
+        """
+        Initializes the callback dispatcher for the current context.
+
+        This method attempts to load signing keys from the configuration tree
+        and creates a callback context using the available private and public
+        keys. It sets up a `PhoenixCallbackDispatcher` instance if the keys
+        are present; otherwise, it logs a warning about the absence of signing
+        keys.
+
+        The method performs the following actions:
+        1. Imports necessary classes for callback dispatching and RSA key handling.
+        2. Retrieves the private and public keys from the configuration settings.
+        3. If both keys are present:
+           - Fixes the private key format if necessary.
+           - Imports the private key as an RSA key object.
+           - Creates a `CallbackCtx` instance with relevant parameters, such as
+             RPC role, signing key, remote public key, serial number, and
+             origin.
+           - Initializes a `PhoenixCallbackDispatcher` with the current
+             object and associates it with the created context.
+        4. If either key is absent, logs a warning and sets the callback to `None`.
+
+        Exception handling is included to manage any errors during the initialization
+        process. If an error occurs, the callback is disabled, and an error message
+        is logged.
+
+        Attributes:
+            callback (PhoenixCallbackDispatcher or None): The callback dispatcher
+                instance, or None if not initialized.
+        """
+        try:
+
+            signing = self.tree_node.get("config", {}).get("security", {}).get("signing", {})
+            priv = signing.get("privkey")
+            pub = signing.get("remote_pubkey")
+
+            if priv and pub:
+                priv = pem_fix(priv)
+                key_obj = RSA.import_key(priv.encode() if isinstance(priv, str) else priv)
+
+                ctx = (
+                    CallbackCtx(agent=self)
+                    .set_rpc_role(self.tree_node.get("config", {}).get("rpc_router_role", "hive.rpc"))
+                    .set_signing_key(key_obj)
+                    .set_remote_pubkey(pub)
+                    .set_serial(self.tree_node.get("serial"))
+                    .set_origin(self.command_line_args.get("universal_id"))
+                    .set_confirm_response(True)
+                )
+
+                self.callback = PhoenixCallbackDispatcher(self)
+                self.callback.ctx = ctx
+
+            else:
+                self.callback = None
+                self.log("[CALLBACK] No signing keys — callback disabled.")
+
+        except Exception as e:
+            self.callback = None
+            self.log("[CALLBACK][FATAL] Failed to initialize callback dispatcher", error=e)
+
+    def crypto_reply(self, response_handler: str, payload: dict, session_id=None, token=None, rpc_role=None):
+        """
+        Unified callback helper that signs and dispatches a secure response.
+
+        This method is responsible for sending a secure response through the
+        callback dispatcher. It ensures that the response is properly signed
+        and dispatched using the current callback context.
+
+        Parameters:
+            response_handler (str): The name of the handler that will process
+                the response on the receiving end.
+            payload (dict): The data to be included in the response, which
+                will be dispatched to the specified return handler.
+            session_id (Optional[str]): An optional session identifier to
+                associate the response with a specific session. Default is None.
+            token (Optional[str]): An optional token for additional security
+                or authentication purposes. Default is None.
+            rpc_role (str, optional): If provided, overrides the default RPC role.
+                This lets you target a specific routing role such as 'hive.rpc'.
+
+        Returns:
+            bool: True if the response was successfully dispatched, False
+                otherwise.
+
+        If the callback context is missing, it logs an error message and
+        returns False. If an error occurs during the dispatch process,
+        it logs the error details and also returns False.
+
+        This method relies on the presence of a valid callback context
+        and ensures that all required parameters are set before dispatching
+        the response.
+        """
+        try:
+            if not self.callback:
+                self.log("[CALLBACK] Missing callback context.")
+                return False
+
+            ctx = self.callback.clone()
+
+            #allow overriding rpc role (route override)
+            if rpc_role:
+                ctx.set_rpc_role(rpc_role)
+
+            ctx.set_response_handler(response_handler)
+            if session_id:
+                ctx.set_session_id(session_id)
+
+            if token:
+                ctx.set_token(token)
+
+            self.callback.dispatch(ctx, payload)
+            return True
+
+        except Exception as e:
+            self.log("[CALLBACK][ERROR] crypto_reply failed", error=e)
+            return False
+
 
     def send_message(self, message):
         self.log(f"[SEND] {json.dumps(message)}")

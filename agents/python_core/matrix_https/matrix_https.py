@@ -28,6 +28,7 @@ class CustomRequestHandler(WSGIRequestHandler):
     add the certificate data to the request's environment dictionary, making
     it available to the application's routes for mutual TLS authentication.
     """
+
     def make_environ(self):
         """
         Creates the WSGI environment dictionary for the request.
@@ -520,7 +521,7 @@ class Agent(BootAgent):
                 )
 
                 # Limit how long handshakes can sit idle
-                httpd.socket.settimeout(30)  # 30-second handshake window
+                httpd.socket.settimeout(1)  # 1-second handshake window
 
                 self.log(f"[HTTPS] Listening on port {self.port}")
 

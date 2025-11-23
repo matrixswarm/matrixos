@@ -64,14 +64,30 @@ class CallbackCtx:
     def __repr__(self):
         return f"<CallbackCtx rpc_role={self._rpc_role} origin={self._origin} serial={self._serial}>"
 
-
-
 class PhoenixCallbackDispatcher:
     """Handles encryption, signing, and delivery of callback responses."""
 
     def __init__(self, agent):
         self.agent = agent
         self.ctx = None
+
+    def clone(self):
+        """
+        Create a shallow clone of the current callback context.
+        """
+        base = self.ctx or CallbackCtx(agent=self.agent)
+
+        c = CallbackCtx(agent=self.agent)
+        c._rpc_role = getattr(base, "_rpc_role", None)
+        c._signing_key = getattr(base, "_signing_key", None)
+        c._remote_pub_pem = getattr(base, "_remote_pub_pem", None)
+        c._serial = getattr(base, "_serial", None)
+        c._origin = getattr(base, "_origin", None)
+        c._confirm_response = getattr(base, "_confirm_response", False)
+        c._response_handler = getattr(base, "_response_handler", None)
+        c._session_id = getattr(base, "_session_id", None)
+        c._token = getattr(base, "_token", None)
+        return c
 
     def dispatch(self, ctx: CallbackCtx = None, content: dict = None):
         """
@@ -99,7 +115,7 @@ class PhoenixCallbackDispatcher:
             remote_pub_pem = context.get_remote_pubkey()
             serial = context.get_serial()
             origin = context.get_origin()
-            handler = context.get_response_handler()
+            response_handler = context.get_response_handler()
             session_id = context.get_session_id()
             token = context.get_token()
 
@@ -110,7 +126,7 @@ class PhoenixCallbackDispatcher:
                 return
 
             # === 3. Encrypt + Sign ===
-            payload = {"handler": handler, "content": content}
+            payload = {"handler": response_handler, "content": content}
 
             self.agent.log(f"{payload}")
 
@@ -140,7 +156,7 @@ class PhoenixCallbackDispatcher:
             for ep in endpoints:
                 pk.set_payload_item("handler", ep.get_handler())
                 self.agent.pass_packet(pk, ep.get_universal_id())
-                self.agent.log(f"[CALLBACK] ✅ Callback dispatched to {ep.get_handler()} (uid={ep.get_universal_id()})")
+                self.agent.log(f"[CALLBACK] ✅ Callback dispatched to rpc handler (uid={ep.get_universal_id()}.{ep.get_handler()}) ")
 
         except Exception as e:
             self.agent.log(f"[CALLBACK][ERROR] Dispatch failed: {e}")

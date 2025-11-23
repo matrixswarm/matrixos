@@ -96,6 +96,8 @@ Get Phoenix Cockpit here:
 
 - Only Phoenix can sign, encrypt, and relay operator commands via the trusted HTTPS/WS agents.
 
+- Only Phoenix can create the agent directive, which stores which agents to boot at runtime.
+
 Running MatrixOS headless without Phoenix? Only use on private networks — or you’re not protected!
 ---
 

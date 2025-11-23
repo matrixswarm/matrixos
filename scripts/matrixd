@@ -162,8 +162,9 @@ def boot_universe(universe: str, args, base="/matrix", python_exec=sys.executabl
         return
 
     swarm_key = (
-        swarm_key
-        or (keys_dir / directive_path.name.replace(".enc.json", ".key")).read_text().strip()
+            args.swarm_key
+            or os.getenv("SWARM_KEY")
+            or (keys_dir / directive_path.name.replace(".enc.json", ".key")).read_text().strip()
     )
 
 

@@ -28,7 +28,7 @@ class Agent(BootAgent):
             self._last_patrol = 0
             self.enable_oracle = bool(cfg.get("enable_oracle", 0))
             self.oracle_role = cfg.get("oracle_role", "hive.oracle")
-            self.alert_role = cfg.get("alert_role", "hive.alert")
+            self._alert_role = cfg.get("alert_role", "hive.alert")
 
             self._last_alert=0
             self._alert_cooldown=0
@@ -39,17 +39,6 @@ class Agent(BootAgent):
             self._rpc_role = self.tree_node.get("rpc_router_role", "hive.rpc")
 
             self.oracle_stack = {}
-
-            # encryption
-            self._signing_keys = self.tree_node.get('config', {}).get('security', {}).get('signing', {})
-            self._has_signing_keys = bool(self._signing_keys.get('privkey')) and bool(self._signing_keys.get('remote_pubkey'))
-
-            if self._has_signing_keys:
-                priv_pem = self._signing_keys.get("privkey")
-                priv_pem = pem_fix(priv_pem)
-                self._signing_key_obj = RSA.import_key(priv_pem.encode() if isinstance(priv_pem, str) else priv_pem)
-
-            self._serial_num = self.tree_node.get('serial', {})
 
             self._emit_beacon = self.check_for_thread_poke("worker", timeout=self._interval * 2, emit_to_file_interval=10)
 
@@ -156,7 +145,7 @@ class Agent(BootAgent):
                 session_id=session_id,
                 offset=0,
                 lines=formatted.splitlines(),
-                return_handler=return_handler,
+                response_handler=return_handler,
             )
 
             if not use_oracle:
@@ -206,7 +195,7 @@ class Agent(BootAgent):
                 session_id=entry["session_id"],
                 offset=0,
                 lines=lines,
-                return_handler=entry["return_handler"],
+                response_handler=entry["return_handler"],
             )
 
         except Exception as e:
@@ -230,7 +219,7 @@ class Agent(BootAgent):
                     session_id=session_id,
                     offset=0,
                     lines=formatted.splitlines(),
-                    return_handler=return_handler,
+                    response_handler=return_handler,
                 )
 
             if not use_oracle:
@@ -368,7 +357,7 @@ class Agent(BootAgent):
                 session_id=entry["session_id"],
                 offset=0,
                 lines=lines,
-                return_handler=entry["return_handler"],
+                response_handler=entry["return_handler"],
             )
         except Exception as e:
             self.log(error=e, block="main_try", level="ERROR")
@@ -386,7 +375,7 @@ class Agent(BootAgent):
                     session_id=entry.get("session_id"),
                     offset=0,
                     lines=[msg],
-                    return_handler="logwatch_panel.update",
+                    response_handler="logwatch_panel.update",
                 )
                 self._send_alert(msg, qid)
         except Exception as e:
@@ -407,7 +396,7 @@ class Agent(BootAgent):
                 return
             self._last_alert = time.time()
 
-            endpoints = self.get_nodes_by_role(self.alert_role)
+            endpoints = self.get_nodes_by_role(self._alert_role)
             if not endpoints:
                 self.log("[LOGWATCH][ALERT] No alert agents found.")
                 return
@@ -432,16 +421,9 @@ class Agent(BootAgent):
             self.log(error=e, block="main_try", level="ERROR")
 
     # ------------------------------------------------------------------
-    def _broadcast_output(self, token, session_id, offset, lines, return_handler):
+    def _broadcast_output(self, token, session_id, offset, lines, response_handler):
         try:
-            ctx = (
-                CallbackCtx(agent=self)
-                .set_rpc_role(self._rpc_role)
-                .set_response_handler(return_handler)
-                .set_confirm_response(True)
-                .set_session_id(session_id)
-                .set_token(token)
-            )
+
             payload = {
                 "session_id": session_id,
                 "token": token,
@@ -451,10 +433,16 @@ class Agent(BootAgent):
                 "timestamp": int(time.time()),
             }
 
-            dispatcher = PhoenixCallbackDispatcher(self)
-            dispatcher.dispatch(ctx=ctx, content=payload)
+            self.crypto_reply(
+                response_handler=response_handler,
+                payload=payload,
+                session_id=session_id,
+                token=token
+            )
+
         except Exception as e:
             self.log("[LOGWATCH][ERROR] broadcast_output failed", error=e)
+
 
 if __name__ == "__main__":
     agent = Agent()

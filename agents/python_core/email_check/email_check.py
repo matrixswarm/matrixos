@@ -7,15 +7,12 @@ sys.path.insert(0, os.getenv("AGENT_PATH"))
 import json, imaplib, threading, time, uuid, hashlib, socket, ssl
 from typing import Dict, Any, Optional, Iterable
 from pathlib import Path
-from Crypto.PublicKey import RSA
 
 from core.python_core.class_lib.crypto.symmetric_encryption.aes.aes import AESHandlerBytesShim
 from core.python_core.class_lib.email.email_parser import EmailParser
 
 from core.python_core.boot_agent import BootAgent
 from core.python_core.utils.swarm_sleep import interruptible_sleep
-from core.python_core.class_lib.gui.callback_dispatcher import CallbackCtx, PhoenixCallbackDispatcher
-from core.python_core.utils.crypto_utils import pem_fix
 
 class Agent(BootAgent):
     """
@@ -85,11 +82,6 @@ class Agent(BootAgent):
             self.active_mail_sessions = {}
             self._signing_keys = cfg.get('security').get('signing')
 
-            priv_pem = self._signing_keys.get("privkey")
-            priv_pem = pem_fix(priv_pem)
-            self._signing_key_obj = RSA.import_key(priv_pem.encode() if isinstance(priv_pem, str) else priv_pem)
-
-            self._serial_num = self.tree_node.get('serial')
             self._aes_key =  cfg.get('security').get('symmetric_encryption').get('key')
 
             self._aes = AESHandlerBytesShim(self._aes_key)
@@ -110,19 +102,6 @@ class Agent(BootAgent):
             self.beacon_imap_poll = self.check_for_thread_poke("imap_poll_inner", timeout=self._poll_interval * 2, emit_to_file_interval=10)
 
             self._swarm_feed_alert_role = cfg.get("swarm_feed_alert_role", "swarm_feed.alert")
-            self._rpc_role = cfg.get("rpc_router_role", "hive.rpc")
-
-            # --- Callback Dispatcher ---
-            self.callback = PhoenixCallbackDispatcher(self)
-            self.callback.ctx = (
-                CallbackCtx(agent=self)
-                .set_rpc_role(self._rpc_role)
-                .set_signing_key(self._signing_key_obj)
-                .set_remote_pubkey(self._signing_keys.get("remote_pubkey"))
-                .set_serial(self._serial_num)
-                .set_origin(self.command_line_args.get("universal_id"))
-                .set_confirm_response(True)
-            )
 
         except Exception as e:
             self.log(error=e, block="main_try", level="ERROR")
@@ -294,7 +273,6 @@ class Agent(BootAgent):
         pwd = cfg.get("incoming_password")
 
         try:
-
 
             if enc in ("SSL", "TLS", "IMAPS", "SSL/TLS"):
                 client = imaplib.IMAP4_SSL(host, port, )
@@ -604,7 +582,7 @@ class Agent(BootAgent):
                 for uid, rec in slice_
             ]
 
-            result = {
+            payload = {
                 "status": "ok",
                 "session_id": session_id,
                 "folder": folder,
@@ -617,12 +595,14 @@ class Agent(BootAgent):
                 },
             }
 
-            ctx = self.callback.ctx
-            ctx.set_response_handler("check_mail.cmd_list_mailbox")
-            ctx.set_session_id(session_id)
-            self.callback.dispatch(ctx, result)
-            if result.get("status") == "error":
-                self.log(f"[EMAIL_CHECK][ERROR] Account {serial} failed: {result.get('error_code')}")
+            self.crypto_reply(
+                response_handler="check_mail.cmd_list_mailbox",
+                payload=payload,
+                session_id=session_id
+            )
+
+            if payload.get("status") == "error":
+                self.log(f"[EMAIL_CHECK][ERROR] Account {serial} failed: {payload.get('error_code')}")
             else:
                 self.log(f"[EMAIL_CHECK] Dispatched callback with {len(messages)} messages (total={total}).")
 
@@ -635,17 +615,14 @@ class Agent(BootAgent):
         return self._poll_all_accounts_once(serial)
 
     def _broadcast_swarm_alert(self, msg: str, level: str = "info"):
-        ctx = self.callback.ctx
-        ctx.set_response_handler(self._swarm_feed_alert_role)  # send to WebSocket agent
-        ctx.set_session_id(None)
 
         payload = {
-                "formatted_msg": msg,
-                "level": level,
-                "timestamp": int(time.time()),
-            }
+            "formatted_msg": msg,
+            "level": level,
+            "timestamp": int(time.time()),
+        }
 
-        self.callback.dispatch(ctx, payload)
+        self.crypto_reply(self._swarm_feed_alert_role, payload)
 
     def cmd_check_email(self, content, packet, identity=None) :
         try:
@@ -668,7 +645,7 @@ class Agent(BootAgent):
             parser = EmailParser()
             parsed = parser.parse(raw_bytes)
 
-            out = {
+            payload = {
                 "status": "ok",
                 "serial": serial,
                 "uuid": uuid_,
@@ -684,11 +661,12 @@ class Agent(BootAgent):
             }
 
             self.log(f"Email check complete for email {uuid_} from account {serial}...")
-            # dispatch to Phoenix (pre-encryption) as you already do
-            ctx = self.callback.ctx
-            ctx.set_response_handler("check_mail.cmd_retrieve_email")
-            ctx.set_session_id(session_id)
-            self.callback.dispatch(ctx, out)
+            self.crypto_reply(
+                response_handler="check_mail.cmd_retrieve_email",
+                payload=payload,
+                session_id=session_id
+            )
+
 
         except Exception as e:
             self.log(error=e)
@@ -761,7 +739,7 @@ class Agent(BootAgent):
         """
         try:
             session_id = content.get("session_id")
-            return_handler=content.get("return_handler")
+            reposnse_handler=content.get("return_handler")
             out = {}
             for s, cfg in self.accounts.items():
                 out[s] = {
@@ -773,17 +751,18 @@ class Agent(BootAgent):
                     "folders": cfg.get("folders") or ["INBOX"],
                 }
 
-            result = {
+            payload = {
                 "status": "ok",
                 "accounts": out,
                 "session_id": session_id,
             }
 
             # Dispatch to Phoenix (pre-encryption) — same pattern as retrieve_email
-            ctx = self.callback.ctx
-            ctx.set_response_handler(return_handler)  # this will match your inbound listener
-            ctx.set_session_id(session_id)
-            self.callback.dispatch(ctx, result)
+            self.crypto_reply(
+                response_handler=reposnse_handler,
+                payload=payload,
+                session_id=session_id
+            )
 
             self.log(f"[EMAIL_CHECK] 📡 Dispatched {len(out)} account(s) to Phoenix.")
 
@@ -816,7 +795,6 @@ class Agent(BootAgent):
     def post_boot(self):
         self.log(f"{self.NAME} v{self.AGENT_VERSION} — mailbox collector ready.")
 
-
     # --- dynamic config reload ----------------------------------------------
     def _apply_live_config(self, cfg):
         try:
@@ -846,7 +824,6 @@ class Agent(BootAgent):
     def cmd_update_accounts(self, content, packet, identity=None):
         """Update accounts.json.aes from Phoenix (RPC call)."""
         try:
-
             self.log(f"{content}")
             new_data = content.get("data", {})
             if not isinstance(new_data, dict):
@@ -861,17 +838,12 @@ class Agent(BootAgent):
         try:
 
             last_poll = 0
-
             while self.running:
-
                 now = time.time()
                 try:
                     if self._force_poll_now or (now - last_poll >= float(self._poll_interval)):
-
                         self._force_poll_now = False
-
                         self.beacon_imap_poll()
-
                         try:
                             self._safe_poll_all_accounts_once()
                         except Exception as e:

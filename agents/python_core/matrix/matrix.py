@@ -43,7 +43,6 @@ from Crypto.Hash import SHA256
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 from core.python_core.class_lib.packet_delivery.utility.security.unwrap_secure_packet import unwrap_secure_packet
 from core.python_core.mixin.reap_status_handler import ReapStatusHandlerMixin
-from core.python_core.class_lib.gui.callback_dispatcher import PhoenixCallbackDispatcher, CallbackCtx
 from core.python_core.utils.crypto_utils import encrypt_with_ephemeral_aes,  sign_data, pem_fix
 from core.python_core.class_lib.directive.boot_directive_info import BootDirectiveInfo
 from core.python_core.class_lib.time_utils.heartbeat_checker import check_heartbeats
@@ -419,12 +418,6 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
 
                 # --- Send callback to Phoenix ---
                 if cb_info:
-                    ctx = CallbackCtx(agent=self)
-                    ctx.set_rpc_role(self.tree_node.get("rpc_router_role", "hive.rpc"))
-                    ctx.set_response_handler(cb_info.get("response_handler", "delete_agent.result"))
-                    ctx.set_confirm_response(True)
-                    ctx.set_session_id(cb_info.get("session_id"))
-                    ctx.set_token(cb_info.get("token"))
 
                     confirm_payload = {
                         "universal_id": uid,
@@ -435,8 +428,13 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
                         "session_id": cb_info.get("session_id"),
                     }
 
-                    dispatcher = PhoenixCallbackDispatcher(self)
-                    dispatcher.dispatch(ctx, confirm_payload)
+                    self.crypto_reply(
+                        response_handler=cb_info.get("response_handler", "delete_agent.result"),
+                        payload=confirm_payload,
+                        session_id=cb_info.get("session_id"),
+                        token=cb_info.get("token"),
+                        rpc_role=self.tree_node.get("rpc_router_role", "hive.rpc"),
+                    )
 
                     self.log(f"[DELETE][CALLBACK] Sent delete_complete for {uid}")
 
@@ -478,12 +476,6 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
 
                 # --- Build secure confirmation back to Phoenix ---
                 if cb_info:
-                    ctx = CallbackCtx(agent=self)
-                    ctx.set_rpc_role(self.tree_node.get("rpc_router_role", "hive.rpc"))
-                    ctx.set_response_handler(cb_info.get("response_handler", "restart_dialog.result"))
-                    ctx.set_confirm_response(True)
-                    ctx.set_session_id(cb_info.get("session_id"))
-                    ctx.set_token(cb_info.get("token"))
 
                     confirm_payload = {
                         "universal_id": uid,
@@ -494,8 +486,13 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
                         "session_id": cb_info.get("session_id"),
                     }
 
-                    dispatcher = PhoenixCallbackDispatcher(self)
-                    dispatcher.dispatch(ctx, confirm_payload)
+                    self.crypto_reply(
+                        response_handler=cb_info.get("response_handler", "restart_dialog.result"),
+                        payload=confirm_payload,
+                        session_id=cb_info.get("session_id"),
+                        token=cb_info.get("token"),
+                        rpc_role=self.tree_node.get("rpc_router_role", "hive.rpc"),
+                    )
 
                 else:
                     self.log("[RESTART][CALLBACK] No callback data found for node.")
@@ -744,12 +741,12 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
         except Exception as e:
             self.log(error=e, block="main_try")
 
-    def _cmd_replace_source(self, content, packet, identity:IdentityObject=None):
+    def _cmd_replace_source(self, content, packet, identity=None):
         """
         Minimal source replacement for an agent. Called by GUI ReplaceAgentDialog.
+        Uses crypto_reply for secure callback to Phoenix.
         """
         try:
-
             target_agent_name = content.get("target_agent_name")
             payload = content.get("payload", {})
 
@@ -767,68 +764,44 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
             decoded = base64.b64decode(encoded).decode()
             sha256_actual = hashlib.sha256(decoded.encode()).hexdigest()
             if sha256_actual != sha256_expected:
-                self.log(f"[REPLACE] ❌ SHA mismatch for {target_agent_name} — expected {sha256_expected}, got {sha256_actual}")
+                self.log(
+                    f"[REPLACE] ❌ SHA mismatch for {target_agent_name} — expected {sha256_expected}, got {sha256_actual}")
                 return
 
-            # Save to agent dir
+            # Write new source
             agent_dir = os.path.join(self.path_resolution["agent_path"], target_agent_name)
             os.makedirs(agent_dir, exist_ok=True)
             agent_path = os.path.join(agent_dir, f"{target_agent_name}.py")
-
             with open(agent_path, "w", encoding="utf-8") as f:
                 f.write(decoded)
-                f.close()
             self.log(f"[REPLACE] ✅ Source written to {agent_path}")
 
-            # --- RPC Confirmation ---
-            rpc_role = self.tree_node.get("rpc_router_role", "hive.rpc")
-            endpoints = self.get_nodes_by_role(rpc_role, return_count=1)
-            if not endpoints:
-                self.log("No hive.rpc-compatible agents found for 'hive.rpc'.")
-                return
-
-            remote_pub_pem = self._signing_keys.get("remote_pubkey")
-
-            payload = {
-                "handler": return_handler,
-                "content": {
-                    "target_agent_name": target_agent_name,
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "session_id": session_id,
-                    "token": token,
-                    "status": "success",
-                    "sha256": sha256_actual,
-                    "agent_dir": agent_dir,
-                    "agent_name": f"{target_agent_name}.py",
-                    "message": f"Source replaced at {agent_path}"
-                }
-            }
-            sealed = encrypt_with_ephemeral_aes(payload, remote_pub_pem)
-            content = {
-                "serial": self._serial_num,
-                "content": sealed,
-                "timestamp": int(time.time()),
-            }
-            sig = sign_data(content, self._signing_key_obj)
-            content["sig"] = sig
-
-            pk1 = self.get_delivery_packet("standard.command.packet")
-            pk1.set_data({
-                "handler": "dummy_handler",  # if a handler isn't set the packet will not set, without a handler
-                "origin": self.command_line_args['universal_id'],
+            # --- Build callback payload ---
+            confirm_payload = {
+                "target_agent_name": target_agent_name,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "session_id": session_id,
-                "content": content,
-            })
+                "token": token,
+                "status": "success",
+                "sha256": sha256_actual,
+                "agent_dir": agent_dir,
+                "agent_name": f"{target_agent_name}.py",
+                "message": f"Source replaced at {agent_path}"
+            }
 
-            for ep in endpoints:
-                pk1.set_payload_item("handler", ep.get_handler())
-                self.pass_packet(pk1, ep.get_universal_id())
+            # --- Secure reply to Phoenix ---
+            self.crypto_reply(
+                response_handler=return_handler,
+                payload=confirm_payload,
+                session_id=session_id,
+                token=token,
+                rpc_role=self.tree_node.get("rpc_router_role", "hive.rpc")
+            )
 
-            self.log(f"[REPLACE] 📡 Confirmation sent for {target_agent_name} (session={session_id})")
+            self.log(f"[REPLACE] 📡 Callback dispatched for {target_agent_name} (session={session_id})")
 
         except Exception as e:
             self.log("[REPLACE] ❌ Failed in cmd_replace_source", error=e, level="ERROR")
-
 
     def _cmd_inject_agents(self, content, packet, identity:IdentityObject = None):
         """Handler for dynamically injecting a new agent or subtree into the swarm.
@@ -1117,8 +1090,6 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
             self.log(error=e, block="main_try")
 
         return ret
-
-
 
     def _cmd_restart_subtree(self, content, packet, identity: IdentityObject = None):
         """
@@ -1650,15 +1621,30 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
             self.log("[DELIVER-TREE][ERROR]", error=e)
 
     def _cmd_matrix_reloaded(self, content, packet, identity=None):
+        """
+        Relaunches the entire swarm (Matrix and children) using the preserved command line
+        from security_box, but guarantees that --swarm_key is passed in case the key file
+        was nuked (for example, after a Railgun reload). Matrix always carries her swarm_key
+        in memory, so we re-inject it.
+        """
+        try:
+            cmd = self.security_box.get("reboot", "")
+            if not cmd:
+                self.log("[REBOOT][ERROR] No preserved launch command found.")
+                return
 
-        cmd = self.security_box.get("reboot","")
-        if not cmd:
-            self.log("[REBOOT][ERROR] No preserved launch command found.")
-            return
+            # ensure the --swarm_key flag is present and injected
+            if "--swarm_key" not in cmd:
+                # safely quote the swarm key so spaces or symbols are preserved
+                cmd += f" --swarm_key='{self.swarm_key}'"
 
-        self.log(f"[REBOOT] Relaunching universe with: {cmd}")
-        subprocess.Popen(cmd, shell=True)
-        os._exit(0)
+            self.log(f"[REBOOT] Relaunching universe with: {cmd}")
+            subprocess.Popen(cmd, shell=True)
+            os._exit(0)
+
+        except Exception as e:
+            self.log("[REBOOT][ERROR] Failed to relaunch Matrix.", error=e)
+
 
 if __name__ == "__main__":
     agent = Agent()
