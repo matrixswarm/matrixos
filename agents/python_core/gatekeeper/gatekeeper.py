@@ -276,6 +276,11 @@ class Agent(BootAgent):
 
                 user = line.split("for")[1].split("from")[0].strip()
                 ip = line.split("from")[1].split()[0].strip()
+                # === IP Ignore List ===
+                ignore_list = self.tree_node.get("config", {}).get("ignore_ips", [])
+                if ip in ignore_list:
+                    self.log(f"[GATEKEEPER][IGNORE] Ignoring trusted IP: {ip}")
+                    return
 
                 try:
                     ipaddress.ip_address(ip)
