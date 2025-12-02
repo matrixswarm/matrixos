@@ -758,6 +758,12 @@ class Agent(BootAgent):
                     continue  # just in case
                 try:
                     (_, type_names, path, filename) = event
+                    # ---- AUTO-WATCH NEW DIRS ----
+                    if "IN_CREATE" in type_names or "IN_MOVED_TO" in type_names:
+                        full_path = os.path.join(path, filename)
+                        if os.path.isdir(full_path):
+                            self._handle_new_directory(full_path)
+
 
                     if not path or not filename:
                         continue
@@ -772,6 +778,45 @@ class Agent(BootAgent):
                     self.log(f"[TRIPWIRE][EVT-FAIL] {event} → {e}", level="ERROR")
         except Exception as e:
             self.log("[TRIPWIRE][EVT-LOOP-CRASH] Event listener crashed", error=e)
+
+    def _handle_new_directory(self, full_path: str):
+        """Automatically add inotify watchers for newly created directories."""
+        try:
+            # Must actually be a directory
+            if not os.path.isdir(full_path):
+                return
+
+            # Prevent duplicates
+            if full_path in self._logged_watch_paths:
+                return
+
+            # Try adding a watcher for the directory itself
+            added = self._safe_add_watch(full_path)
+
+            if added:
+                self._logged_watch_paths.add(full_path)
+                self.log(f"[TRIPWIRE] 📁 Added watcher for new directory: {full_path}")
+
+                # --- OPTIONAL ULTRA MODE (deep recursive expansion) ---
+                for root, dirs, files in os.walk(full_path):
+                    # Watch subdirectories
+                    for d in dirs:
+                        dpath = os.path.join(root, d)
+                        if dpath not in self._logged_watch_paths:
+                            if self._safe_add_watch(dpath):
+                                self._logged_watch_paths.add(dpath)
+                                self.log(f"[TRIPWIRE] 📁 Added watcher (deep) for: {dpath}")
+
+                    # Watch files
+                    for f in files:
+                        fpath = os.path.join(root, f)
+                        if fpath not in self._logged_watch_paths:
+                            if self._safe_add_watch(fpath):
+                                self._logged_watch_paths.add(fpath)
+                                self.log(f"[TRIPWIRE] 📄 Added watcher (deep) for: {fpath}")
+
+        except Exception as e:
+            self.log(f"[TRIPWIRE][DIR-WATCH] Error adding watcher for {full_path}", error=e)
 
     def _build_watcher_table(self):
         """Build and maintain a table of active watchers to track monitored paths."""

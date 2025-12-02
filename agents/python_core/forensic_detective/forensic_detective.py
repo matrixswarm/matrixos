@@ -148,68 +148,79 @@ class Agent(BootAgent):
             self.log(error=e, level="ERROR", block="main_try")
 
     def _request_oracle_analysis(self, incident_id, critical_event, correlated_events):
-        """Asks the Oracle for a deeper analysis of the incident."""
-        endpoints =  self.get_nodes_by_role(self.oracle_role, return_count=1)
+        """Requests deeper AI analysis from Oracle using NEW message format."""
+
+        endpoints = self.get_nodes_by_role(self.oracle_role, return_count=1)
         if not endpoints:
             self.log(f"Oracle analysis enabled, but no agent with role '{self.oracle_role}' found.", level="WARNING")
             return
 
-        # --- REMEDY ---
-        # Robustly handle the 'details' field, which can be a dict or a string.
+        # --- Extract usable log info ---
         details = critical_event.get('details')
         if isinstance(details, dict):
             critical_log = details.get('log_line', str(details))
         elif isinstance(details, str):
             critical_log = details
         else:
-            critical_log = "No specific log line or details provided for the critical event."
+            critical_log = "No log details provided."
 
-        context_logs_list = []
+        context_logs = []
         for evt in correlated_events:
-            if evt.get('severity') != 'CRITICAL':
-                evt_details = evt.get('details')
-                log_line = 'N/A'
-                if isinstance(evt_details, dict):
-                    log_line = evt_details.get('log_line', str(evt_details))
-                elif isinstance(evt_details, str):
-                    log_line = evt_details
+            evt_details = evt.get("details")
+            if isinstance(evt_details, dict):
+                log_line = evt_details.get("log_line", str(evt_details))
+            elif isinstance(evt_details, str):
+                log_line = evt_details
+            else:
+                log_line = "N/A"
 
-                context_logs_list.append(f"- {evt.get('severity')}: {log_line}")
+            context_logs.append(f"- {evt.get('severity', 'INFO')}: {log_line}")
 
-        context_logs_str = "\n".join(context_logs_list)
-        # --- END REMEDY ---
+        context_block = "\n".join(context_logs)
 
-        prompt = (
-            "You are an expert IT security analyst and systems administrator. "
-            "An automated monitor has detected a critical event on a server. "
-            "Your task is to analyze the critical event in the context of the preceding log entries, "
-            "diagnose the probable root cause, and provide clear, actionable remediation steps.\n\n"
-            "**Critical Event:**\n"
-            f"`{critical_log}`\n\n"
-            "**Preceding Events (for context):**\n"
-            f"{context_logs_str}\n\n"
-            "**Your Analysis:**\n"
-            "1.  **Root Cause Analysis:** (Based on the events, what is the most likely cause of the critical event?)\n"
-            "2.  **Recommended Actions:** (Provide a short, numbered list of shell commands or steps an administrator should take to verify the issue and remediate it.)"
-        )
+        # --- Oracle Chat Messages ---
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Oracle, an expert IT security analyst. "
+                    "Provide root cause analysis and remediation instructions. "
+                    "Always be concise and actionable."
+                )
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Critical Event:\n{critical_log}\n\n"
+                    f"Context Events:\n{context_block}\n\n"
+                    "Provide:\n"
+                    "1. Root Cause (1–2 sentences)\n"
+                    "2. Recommended Actions (numbered)\n"
+                )
+            }
+        ]
 
+        # --- Build packet for Oracle ---
         pk = self.get_delivery_packet("standard.command.packet")
         pk.set_data({
             "handler": "cmd_msg_prompt",
             "content": {
-                "prompt": prompt,
-                "query_id": incident_id,  # Use incident_id to track the response
+                "messages": messages,  # NEW REQUIRED FIELD
+                "query_id": incident_id,
+                "session_id": self.command_line_args.get("universal_id"),
+                "token": incident_id,
+                "rpc_role": "hive.rpc",
+                "return_handler": "cmd_oracle_forensics_response",
                 "target_universal_id": self.command_line_args.get("universal_id"),
-                "return_handler": "cmd_oracle_forensics_response"  # The handler for the Oracle's answer
             }
         })
 
-        # Send the request to the first available Oracle
+        # --- Send to Oracle ---
         for ep in endpoints:
             pk.set_payload_item("handler", ep.get_handler())
             self.pass_packet(pk, ep.get_universal_id())
 
-        self.log(f"Requested Oracle analysis for incident {incident_id}.")
+        self.log(f"Requested NEW Oracle analysis for incident {incident_id}.")
 
     def cmd_oracle_forensics_response(self, content, packet, identity=None):
         """Handles the enriched analysis received from the Oracle."""

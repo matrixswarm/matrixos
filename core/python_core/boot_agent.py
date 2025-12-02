@@ -110,6 +110,10 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
         #hold Matrix credentials, encase of her going down
         self.security_box = payload.get("security_box", {})
 
+        #is the agent_tree loaded?
+        self.is_agent_tree_loaded = False
+
+
         config = EncryptionConfig()
 
         #to be accessed by long packet_listener processes
@@ -1317,6 +1321,8 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
                         self.log("[SPAWN] Corrupt or invalid tree — deleting and re-requesting.")
                         os.remove(tree_path_resolved)
                         continue  # Will retry in next loop
+
+                    self.is_agent_tree_loaded = True
 
                     tree = tp.root
                     last_tree_mtime = mtime

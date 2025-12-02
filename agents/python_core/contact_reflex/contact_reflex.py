@@ -387,43 +387,54 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(f"Error processing new message", error=e)
 
-
     def send_to_oracle(self, query_id, text):
         """
-        Constructs and sends a command packet to an Oracle agent.
-
-        This method requests an AI-based classification of the message text
-        to determine if it is spam.
-
-        Args:
-            query_id (str): A unique identifier for this query.
-            text (str): The message body to be analyzed.
+        NEW Oracle message format (messages-only).
+        Sends a spam classification request using chat-style messages.
         """
         try:
-            # Standardized Oracle packet
-            pk_command = self.get_delivery_packet("standard.command.packet")
-            pk_command.set_data({
-                "handler": "cmd_msg_prompt",  # Standard handler for Oracle text analysis
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Oracle, a classification AI. "
+                        "Your ONLY job is to read user messages and classify them as "
+                        "'spam' or 'not_spam'. "
+                        "Return ONLY one word: spam OR not_spam. No punctuation. No explanation."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ]
+
+            pk = self.get_delivery_packet("standard.command.packet")
+            pk.set_data({
+                "handler": "cmd_msg_prompt",
                 "timestamp": int(time.time()),
                 "content": {
-                    "prompt": f"Classify the following message as 'spam' or 'not_spam'.\n\n{text}",
-                    "message_type": "contact_form",
+                    "messages": messages,
                     "query_id": query_id,
-                    "target_universal_id": self.command_line_args.get("universal_id", "contact-reflex"),
+                    "session_id": self.command_line_args.get("universal_id"),
+                    "token": query_id,
+                    "rpc_role": "hive.rpc",  # ensures Oracle replies correctly
                     "return_handler": "cmd_oracle_response",
-                },
-
+                    "target_universal_id": self.command_line_args.get("universal_id")
+                }
             })
 
-            # Send to the first agent serving as hive.oracle
-            for node in self.get_nodes_by_role("hive.oracle",return_count=1):
-                self.pass_packet(pk_command, node["universal_id"])
+            # Send to Oracle agent(s)
+            for node in self.get_nodes_by_role("hive.oracle", return_count=1):
+                self.pass_packet(pk, node["universal_id"])
 
             # Mark as sent
             self.pending_evals[query_id]['sent'] = True
 
+            self.log(f"[CONTACT_REFLEX] Sent spam-check query {query_id} to Oracle.")
+
         except Exception as e:
-            self.log(error=e, block='main_try')
+            self.log(error=e, block='send_to_oracle')
 
     def cmd_oracle_response(self, content, packet, identity=None):
         """

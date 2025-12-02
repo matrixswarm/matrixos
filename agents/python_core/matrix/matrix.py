@@ -691,7 +691,7 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
         """
         uid = content.get("target_universal_id")
         updates = content.get("config", {})
-
+        push_live_config = content.get("push_live_config", False)
         try:
             if not uid or not updates:
                 self.log("[UPDATE_AGENT][ERROR] Missing target_universal_id or fields.")
@@ -711,15 +711,17 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
                 node["config"] = {}
 
             updated = False
-            for key, val in updates.items():
-                node["config"][key] = val
-                updated = True
-                self.log(f"[UPDATE_AGENT] ✅ Patched config['{key}'] for '{uid}'")
+            if not push_live_config:
+                for key, val in updates.items():
+                    node["config"][key] = val
+                    updated = True
+                    self.log(f"[UPDATE_AGENT] ✅ Patched config['{key}'] for '{uid}'")
 
-            if content.get("push_live_config", False):
+            #a transient config or self-managed config
+            if push_live_config:
                 try:
                     pk1 = self.get_delivery_packet("standard.general.json.packet")
-                    pk1.set_data(node["config"])
+                    pk1.set_data(updates)
 
                     self.pass_packet(pk1, uid, "config")
 
@@ -735,7 +737,7 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
                     self.delegate_tree_to_agent(parent["universal_id"], self.tree_path_dict)
 
                 self.log(f"[UPDATE_AGENT] 🔁 Agent '{uid}' successfully updated and delegated.")
-            else:
+            elif not push_live_config:
                 self.log(f"[UPDATE_AGENT] ⚠️ No valid fields updated for '{uid}'")
 
         except Exception as e:

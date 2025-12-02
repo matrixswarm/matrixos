@@ -12,7 +12,7 @@ from openai import OpenAI
 from core.python_core.boot_agent import BootAgent
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 
-MAX_CHUNK_TOKENS = 6000  # safely below the 8k-ish window
+MAX_TOKENS = 12000  # safely below the 8k-ish window
 
 class Agent(BootAgent):
     """
@@ -34,7 +34,7 @@ class Agent(BootAgent):
         super().__init__()
 
         try:
-            self.AGENT_VERSION = "1.0.9"
+            self.AGENT_VERSION = "2.0"
 
             self._cfg_lock = threading.Lock()
 
@@ -50,7 +50,6 @@ class Agent(BootAgent):
             self.outbox_path = os.path.join(self.path_resolution["comm_path_resolved"], "outbox")
             os.makedirs(self.outbox_path, exist_ok=True)
             self.use_dummy_data = False
-            self._last_config = {}
             self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
         except Exception as e:
             self.log(error=e, block='main_try', level='ERROR')
@@ -78,139 +77,192 @@ class Agent(BootAgent):
 
     def cmd_msg_prompt(self, content, packet, identity: IdentityObject = None):
         """
-        Handles an incoming prompt request from another agent.
-
-        This is the primary command handler for the Oracle. It receives a
-        prompt, sends it to the OpenAI API for completion, and then packages
-        the response into a command packet. This response packet is then sent
-        back to the original requesting agent, instructing it to use the
-        specified `return_handler` for processing. This enables a flexible,
-        asynchronous request/response pattern within the swarm.
-
-        Args:
-            content (dict): The command payload containing the prompt and
-                routing information. Expected keys include 'prompt',
-                'target_universal_id', 'return_handler', and 'query_id'.
-            packet (dict): The raw packet object received by the agent.
-            identity (IdentityObject, optional): The verified identity of the
-                agent that sent the prompt.
+        Oracle analysis using NEW multi-message format only.
+        Expected content:
+          {
+            "messages": [...],         # list of chat messages
+            "query_id": "...",
+            "return_handler": "...",
+            "session_id": "...",
+            "token": "...",
+            "rpc_role": "hive.rpc"    # optional override
+          }
         """
 
-        self.log("[ORACLE] Reflex prompt received.")
-
-        target_uid = None
-        if not self.encryption_enabled:
-            target_uid = content.get("target_universal_id", False)  # swarm running in plaintext mode
-
-        else:
-            # reject invalid or missing identity
-            if isinstance(identity, IdentityObject) and identity.has_verified_identity():
-                 target_uid = identity.get_sender_uid()
-
-
-        # Parse request context
-        prompt_text = content.get("prompt", "")
-        history = content.get("history", [])
-        return_handler = content.get("return_handler", "cmd_oracle_response")
-        response_mode = (content.get("response_mode") or "terse").lower()
-        query_id = content.get("query_id", 0)
-
         try:
 
+            self.log("[ORACLE] Reflex prompt received.")
+            # --- Mode selection ---
+            use_callback = bool(content.get("use_callback", False))
 
-            if not prompt_text:
-                self.log("[ORACLE][ERROR] Prompt content is empty.")
+            messages = content.get("messages")
+            return_handler = content.get("return_handler")
+            response_mode = (content.get("response_mode") or self.response_mode or "terse").lower()
+            query_id = content.get("query_id", 0)
+            session_id = content.get("session_id","")
+            token = content.get("token", "")
+
+            # Resolve target uid (for swarm-mode only)
+            target_uid = None
+            if not use_callback:
+                if not self.encryption_enabled:
+                    # plaintext swarm – target specified directly
+                    target_uid = content.get("target_universal_id", False)
+                else:
+                    # encrypted swarm – require verified identity
+                    if isinstance(identity, IdentityObject) and identity.has_verified_identity():
+                        target_uid = identity.get_sender_uid()
+
+            # In swarm mode we require a target to send packet to
+            if not use_callback and not target_uid:
+                self.log("[ORACLE][ERROR] target_universal_id missing. Cannot respond in swarm mode.")
                 return
 
-            if not (target_uid):
-                self.log("[ORACLE][ERROR] target_universal_id. Cannot respond.")
+            if not isinstance(messages, list) or not messages:
+                self.log(f"[ORACLE][ERROR] Missing or invalid messages array (query_id={query_id}, universal_id={target_uid}).")
                 return
 
+            self.log(f"[ORACLE] Received {len(messages)} chat chunks (query_id={query_id}).")
             self.log(f"[ORACLE] Response mode: {response_mode}")
 
-            messages = history + [{"role": "user", "content": prompt_text}]
+            # ---- Truncation safeguard ----
+            total_chars = sum(len(m.get("content", "")) for m in messages)
+            if total_chars > 12000:
+                self.log(f"[ORACLE] ✂️ Truncating oversized prompt ({total_chars} chars).")
+                messages = messages[:1] + messages[-5:]
 
-            with self._cfg_lock:
-                client = self.client
-                model = self.model
-                temperature=self.temperature
-
-            # Call the OpenAI API
-            if len(prompt_text) > MAX_CHUNK_TOKENS:
-                response = self._process_large_prompt(prompt_text, history)
-            else:
-                response = client.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature
-                ).choices[0].message.content.strip()
-
-            # Construct the response packet
-            pk_resp = self.get_delivery_packet("standard.command.packet")
-            pk_resp.set_data({
-                "handler": return_handler,  # This is what the recipient will process
-                "packet_id": int(time.time()),
-                "content": {
-                    "query_id": query_id,
-                    "response": response,
-                    "origin": self.command_line_args.get("universal_id", "oracle"),
-                    "history": history,
-                    "prompt": prompt_text,
-                    "response_mode": response_mode,
-                }
-            })
-
-            # Send the response back to the original requester
-            self.pass_packet(pk_resp, target_uid)
-            self.log(f"[ORACLE] Sent {return_handler} reply to {target_uid} for query_id {query_id}")
-
-        except Exception as e:
-            self.log(error=e, block='main_try', level='ERROR')
-
-    def _split_large_prompt(self, text, max_len=MAX_CHUNK_TOKENS):
-        parts = []
-        while len(text) > max_len:
-            cut = text.rfind("\n", 0, max_len)
-            cut = cut if cut != -1 else max_len
-            parts.append(text[:cut])
-            text = text[cut:]
-        parts.append(text)
-        return parts
-
-    def _process_large_prompt(self, text, history):
-
-
-        try:
-            merged = "error"
+            # ---- OpenAI Call ----
             with self._cfg_lock:
                 client = self.client
                 model = self.model
                 temperature = self.temperature
 
-            chunks = self._split_large_prompt(text)
-            summaries = []
-            for i, chunk in enumerate(chunks, 1):
-                self.log(f"[ORACLE] Processing chunk {i}/{len(chunks)} ({len(chunk)} chars)")
-                self._emit_beacon_packet_listener()
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=history + [{"role": "user", "content": chunk}],
-                    temperature=temperature
-                ).choices[0].message.content.strip()
-                summaries.append(resp)
-            merged = "\n---\n".join(summaries)
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature
+            ).choices[0].message.content.strip()
 
-            if len(merged) > MAX_CHUNK_TOKENS:
-                self.log("[ORACLE] Result too large, performing recursive summarization.")
-                merged = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": f"Summarize the following analysis:\n{merged}"}],
-                    temperature=temperature,
-                ).choices[0].message.content.strip()
+            if use_callback:
+                self.log(f"[ORACLE] ✅ Completed analysis for Phoenix.")
+            else:
+                self.log(f"[ORACLE] ✅ Completed analysis for {query_id}.")
+
+            # --- CALLBACK MODE (Phoenix / GUI) ---
+            if use_callback:
+                payload = {
+                    "query_id": query_id,
+                    "response": response,
+                    "origin": self.command_line_args.get("universal_id", "oracle"),
+                    "response_mode": response_mode,
+                }
+
+                ok = self.crypto_reply(
+                    response_handler=return_handler,
+                    payload=payload,
+                    session_id=session_id,
+                    token=token,
+                    rpc_role=self.tree_node.get("config", {}).get("rpc_router_role", "hive.rpc")
+                )
+
+                if ok:
+                    self.log(f"[ORACLE] Sent callback reply → {return_handler} (session={session_id}, token={token})")
+                else:
+                    self.log("[ORACLE][ERROR] crypto_reply failed for callback mode.")
+
+            else:
+
+                # --- SWARM MODE (original behavior) ---
+                pk_resp = self.get_delivery_packet("standard.command.packet")
+                pk_resp.set_data({
+                    "handler": return_handler,  # This is what the recipient will process
+                    "packet_id": int(time.time()),
+                    "content": {
+                        "query_id": query_id,
+                        "response": response,
+                        "origin": self.command_line_args.get("universal_id", "oracle"),
+                        "response_mode": response_mode,
+
+                    }
+                })
+
+                # Send the response back to the original requester
+                self.pass_packet(pk_resp, target_uid)
+                self.log(f"[ORACLE] Sent {return_handler} reply to {target_uid} for query_id {query_id}")
+
         except Exception as e:
-            self.log(error=e, block='main_try', level='ERROR')
-        finally:
-            return merged
+            self.log("[ORACLE][FATAL] cmd_msg_prompt crashed.", error=e)
+
+    def cmd_generate_embeddings(self, content, packet, identity: IdentityObject = None):
+        """
+        Handles embedding requests from TrendScout or other agents.
+        Expects:
+          content = {
+              "text": "string or list of strings",
+              "return_handler": "handler_to_call_back",
+              "session_id": optional,
+              "token": optional
+          }
+        """
+        try:
+
+            target_uid = None
+
+            if not self.encryption_enabled:
+                # plaintext swarm – target specified directly
+                target_uid = content.get("target_universal_id", False)
+            else:
+                # encrypted swarm – require verified identity
+                if isinstance(identity, IdentityObject) and identity.has_verified_identity():
+                    target_uid = identity.get_sender_uid()
+
+            if not target_uid:
+                self.log("[ORACLE][ERROR] target_universal_id missing. Cannot respond in swarm mode.")
+                return
+
+            #text
+            text = content.get("text")
+
+            #ref id
+            id = content.get("id", 0)
+
+            return_handler = content.get("return_handler", "cmd_oracle_embedding_response")
+
+            if not text:
+                self.log("[ORACLE][ERROR] Empty text for embedding.")
+                return
+
+            # Support both string and list inputs
+            response = self.client.embeddings.create(
+                model="text-embedding-3-small",
+                input=text
+            )
+
+            embeddings = [d.embedding for d in response.data]
+
+            payload = {
+                "response_type": 1,  # marker that it's an embedding
+                "embeddings": embeddings,
+                "model": "text-embedding-3-small",
+                "count": len(embeddings),
+                "id": id,
+                "text": text
+            }
+
+            if target_uid:
+                pk_resp = self.get_delivery_packet("standard.command.packet")
+                pk_resp.set_data({
+                    "handler": return_handler,
+                    "content": payload
+                })
+                self.pass_packet(pk_resp, target_uid)
+                self.log(f"[ORACLE] → Sent embeddings back to {target_uid}")
+            else:
+                self.log("[ORACLE][WARN] No target UID found for swarm callback.")
+
+
+        except Exception as e:
+            self.log("[ORACLE][ERROR] Failed embedding request", error=e)
 
     def worker(self, config=None, identity=None):
         # Emit beacon for Phoenix heartbeat
@@ -218,10 +270,9 @@ class Agent(BootAgent):
             self._emit_beacon()
 
             # Detect config changes dynamically
-            if isinstance(config, dict) and config != self._last_config:
+            if isinstance(config, dict) and bool(config.get("push_live_config", 0)):
                 self.log(f"[ORACLE] 🔁 Live config update detected: {config}")
                 self._apply_live_config(config)
-                self._last_config = dict(config)  # cache snapshot
 
             interruptible_sleep(self, 5)
             return
@@ -259,6 +310,44 @@ class Agent(BootAgent):
 
         except Exception as e:
             self.log("[ORACLE][ERROR] Failed to apply live config", error=e)
+
+    def cmd_label_clusters(self, content, packet, identity:IdentityObject =None):
+
+        target_uid = None
+
+        if not self.encryption_enabled:
+            # plaintext swarm – target specified directly
+            target_uid = content.get("target_universal_id", False)
+        else:
+            # encrypted swarm – require verified identity
+            if isinstance(identity, IdentityObject) and identity.has_verified_identity():
+                target_uid = identity.get_sender_uid()
+
+        if not target_uid:
+            self.log("[ORACLE][ERROR] target_universal_id missing. Cannot respond in swarm mode.")
+            return
+
+        clusters = content.get("clusters", [])
+
+        prompt = "Name each semantic group of tags:\n\n"
+        for i, c in enumerate(clusters):
+            prompt += f"Cluster {i+1}: {', '.join(c['tags'])}\n"
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        ).choices[0].message.content
+
+        payload = {"labels": response}
+
+        pk_resp = self.get_delivery_packet("standard.command.packet")
+        pk_resp.set_data({
+            "handler": content.get("return_handler"),
+            "content": payload
+        })
+        self.pass_packet(pk_resp, target_uid)
+
 
 if __name__ == "__main__":
     agent = Agent()

@@ -145,7 +145,6 @@ class Agent(BootAgent):
         """
         self.AGENT_VERSION = "2.0.0"
         self.app = Flask(__name__)
-        self.port = 65431
 
         try:
 
@@ -173,6 +172,13 @@ class Agent(BootAgent):
             self._cert_pem = pem_fix(cert_pem)
             self._key_pem = pem_fix(key_pem)
             self._ca_pem = pem_fix(ca_pem)
+
+            #port
+            self.port = int(config.get("port", 65431))
+
+            # Check if the port is within the valid range (1–65535).
+            if not (1 <= self.port <= 65535):
+                raise ValueError(f"Invalid port number: {self.port}. Port must be in the range 1–65535.")
 
             # track expected client SPKI pin (not enforced)
             self._expected_peer_spki = client_cert.get("spki_pin")
@@ -254,7 +260,7 @@ class Agent(BootAgent):
         if not self.running:
             return
 
-        # emit a liveness beacon so Phoenix sees this agent alive
+        # emit a liveness beacon so Matrix sees this agent alive
         self._emit_beacon()
 
         # Also double-check that the Flask server is still healthy

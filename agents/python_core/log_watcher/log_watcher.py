@@ -302,22 +302,44 @@ class Agent(BootAgent):
 
     # ------------------------------------------------------------------
     def _send_to_oracle(self, summary, query_id):
-
+        """
+        Breaks the digest into chat-style messages and sends to Oracle using `messages` format.
+        """
         try:
             endpoints = self.get_nodes_by_role(self.oracle_role, return_count=1)
             if not endpoints:
                 self.log(f"[LOGWATCH] No Oracle agents found for role {self.oracle_role}.")
                 return
 
-            prompt = (
-                "Analyze the following system log digest for anomalies or potential issues.\n\n"
-                f"{json.dumps(summary, indent=2)}"
-            )
+            # Start with a system directive
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Oracle, a diagnostic AI tasked with analyzing system logs. "
+                        "Summarize anomalies, errors, or signs of misconfiguration. "
+                        "Be concise, structured, and use bullet points if needed."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Begin analysis. Query ID: {query_id}."
+                }
+            ]
+
+            # Chunk collector results as separate messages
+            for name, section in summary.items():
+                section_msg = {
+                    "role": "user",
+                    "content": f"Section: {name.upper()}\n\n{json.dumps(section, indent=2)[:5000]}"
+                }
+                messages.append(section_msg)
+
             pk = self.get_delivery_packet("standard.command.packet")
             pk.set_data({
                 "handler": "cmd_msg_prompt",
                 "content": {
-                    "prompt": prompt,
+                    "messages": messages,
                     "query_id": query_id,
                     "target_universal_id": self.command_line_args.get("universal_id"),
                     "return_handler": "cmd_oracle_response",
@@ -328,11 +350,10 @@ class Agent(BootAgent):
                 pk.set_payload_item("handler", ep.get_handler())
                 self.pass_packet(pk, ep.get_universal_id())
 
-            self.log(f"[LOGWATCH] Digest sent to Oracle (query {query_id}).")
+            self.log(f"[LOGWATCH] Digest sent to Oracle (query {query_id}) with {len(messages)} messages.")
 
         except Exception as e:
             self.log(error=e, block="main_try", level="ERROR")
-
 
     # ------------------------------------------------------------------
     def cmd_oracle_response(self, content, packet, identity=None):
