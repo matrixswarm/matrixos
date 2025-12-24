@@ -29,7 +29,7 @@ class Agent(BootAgent):
 
             self._initialized_from_tree = True
             # Support ZIP code override
-            self.zipcode = self._private_config.get("zip-code") or os.getenv("WEATHER_ZIPCODE")
+            self.zipcode = self._private_config.get("zip_code", 20007)
 
 
             self.log(f"🌪 [HOWDY] We've moved. StormCrow now watches over ZIP: {self.zipcode}")
@@ -37,10 +37,12 @@ class Agent(BootAgent):
             if self.zipcode:
                 self.lat, self.lon = self.resolve_zip_to_latlon(self.zipcode)
             else:
-                self.lat = os.getenv("WEATHER_LAT", "37.7749")
-                self.lon = os.getenv("WEATHER_LON", "-122.4194")
+                self.lat = self._private_config.get("weather_latitude", "38.9152945")
+                self.lon = self._private_config.get("weather_longitude", "-77.0827632")
 
-            self.alert_endpoint = f"https://api.weather.gov/alerts/active?point={self.lat},{self.lon}"
+            endpoint= self._private_config.get("alert_endpoint", "https://api.weather.gov/alerts/active?point")
+
+            self.alert_endpoint = f"{endpoint}={self.lat},{self.lon}"
             self.last_alert_ids = set()
 
         except Exception as e:
@@ -61,11 +63,10 @@ class Agent(BootAgent):
         try:
 
             self._emit_beacon()
-            if config and isinstance(config, dict):
-
+            if isinstance(config, dict) and bool(config.get("push_live_config", 0)):
+                self.log(f"[STORM_CROW] 🔁 Live config update detected: {config}")
                 self.log(f"config loaded: {config}")
                 self._private_config = config
-                self.log("[WORKER] 🔁 Full config applied.")
                 self._initialized_from_tree = False
 
             if not self._initialized_from_tree:
@@ -146,7 +147,7 @@ class Agent(BootAgent):
 
         pk1.set_packet(pk2, "content")
 
-        alert_nodes = self.get_nodes_by_role("hive.alert.send_alert_msg")
+        alert_nodes = self.get_nodes_by_role(self._private_config.get("hive_to_alert", "hive.alert"))
         if not alert_nodes:
             self.log("No alert-compatible agents found.")
             return
@@ -167,13 +168,10 @@ class Agent(BootAgent):
             return lat, lon
         except Exception as e:
             self.log(f"Could not resolve ZIP {zip_code}", error=e, block="main_try")
-            return os.getenv("WEATHER_LAT", "37.7749"), os.getenv("WEATHER_LON", "-122.4194")
+            return self._private_config.get("weather_latitude", "38.9152945"), self._private_config.get("weather_longitude", "-77.0827632")
 
     def worker_post(self):
         self.log("[STORMCROW] Worker loop scanning for severe weather alerts...")
-
-
-
 
 if __name__ == "__main__":
     agent = Agent()

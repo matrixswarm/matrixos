@@ -452,6 +452,7 @@ class Agent(BootAgent):
 
         finally:
             self._websocket_clients.discard(websocket)
+            sid = None
             if hasattr(websocket, "session_id"):
                 sid = websocket.session_id
                 self._sessions.pop(sid, None)

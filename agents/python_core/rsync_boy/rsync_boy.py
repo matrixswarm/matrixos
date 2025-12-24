@@ -4,143 +4,116 @@ sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 
 
-import os, time, subprocess, json, hashlib
+import time, json
 from core.python_core.boot_agent import BootAgent
 from core.python_core.utils.swarm_sleep import interruptible_sleep
+from core.python_core.class_lib.processes.thread_launcher import ThreadLauncher
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 
 
 class Agent(BootAgent):
+    """
+    rsync_boy — Job Dispatcher
+    -------------------------
+    • Reads declarative job definitions from config
+    • Decides when jobs should fire
+    • Launches ephemeral factory threads
+    • Never performs work itself
+    """
+
     def __init__(self):
         super().__init__()
-        try:
-            self.AGENT_VERSION = "1.0.0"
+        self.AGENT_VERSION = "2.0.0"
 
-            cfg = self.tree_node.get("config", {})
+        cfg = self.tree_node.get("config", {}) or {}
 
-            self.watch_path = cfg.get("watch_path", "/matrix/sora/outbox")
-            self.ssh_host = cfg.get("ssh_host")
-            self.ssh_port = int(cfg.get("ssh_port", 22))
-            self.ssh_user = cfg.get("ssh_user")
-            self.remote_path = cfg.get("ssh_path")
-            self.auth_type = cfg.get("auth_type")
-            self.private_key = cfg.get("private_key")
-            self.password = cfg.get("password")
+        self.poll_interval = int(cfg.get("poll_interval", 60))
+        self.jobs = cfg.get("jobs", [])
 
-            self.poll_interval = int(cfg.get("poll_interval", 10))
+        self._last_run = {}  # job_id -> timestamp
+        self.thread_launcher = ThreadLauncher(self)
 
-            os.makedirs(self.watch_path, exist_ok=True)
+        self._emit_beacon = self.check_for_thread_poke(
+            "worker",
+            timeout=self.poll_interval * 2,
+            emit_to_file_interval=10
+        )
 
-            # delivery DB
-            self.db_path = os.path.join(self.path_resolution["comm_path_resolved"],
-                                        "sora_delivered.json")
-            self.delivered = self._load_db()
+        self.log(f"[RSYNC_BOY] Loaded {len(self.jobs)} jobs")
 
-            self._emit_beacon = self.check_for_thread_poke(
-                "worker", timeout=self.poll_interval * 2, emit_to_file_interval=10
-            )
+    # --------------------------------------------------
+    def _job_due(self, job, now: float) -> bool:
+        job_id = job.get("id")
+        sched = job.get("schedule", {}) or {}
 
-        except Exception as e:
-            self.log(error=e, block="init")
+        interval = int(sched.get("interval_sec", 0))
+        run_on_boot = bool(sched.get("run_on_boot", False))
 
-    # ---------------------------------------------------------
-    def _load_db(self):
-        try:
-            if os.path.exists(self.db_path):
-                return json.load(open(self.db_path))
-        except:
-            pass
-        return {}
+        last = self._last_run.get(job_id)
 
-    def _save_db(self):
-        try:
-            with open(self.db_path, "w") as f:
-                json.dump(self.delivered, f, indent=2)
-        except Exception as e:
-            self.log("[SORA][DB][ERROR]", error=e)
+        if last is None:
+            return run_on_boot or interval > 0
 
-    # ---------------------------------------------------------
-    def _file_hash(self, path):
-        try:
-            h = hashlib.sha256()
-            with open(path, "rb") as f:
-                while chunk := f.read(65536):
-                    h.update(chunk)
-            return h.hexdigest()
-        except:
-            return "unknown"
-
-    # ---------------------------------------------------------
-    def _rsync_file(self, local_file):
-        remote = f"{self.ssh_user}@{self.ssh_host}:{self.remote_path}"
-
-        if self.auth_type == "priv":
-            cmd = [
-                "rsync", "-avz", "-e",
-                f"ssh -p {self.ssh_port} -i {self.private_key}",
-                local_file, remote
-            ]
-        else:
-            # password authentication (sshpass)
-            cmd = [
-                "sshpass", "-p", self.password,
-                "rsync", "-avz", "-e",
-                f"ssh -p {self.ssh_port}",
-                local_file, remote
-            ]
-
-        self.log(f"[SORA][RSYNC] {' '.join(cmd)}")
-        res = subprocess.run(cmd, capture_output=True, text=True)
-
-        if res.returncode != 0:
-            self.log(f"[SORA][ERROR] rsync failed: {res.stderr}")
+        if interval <= 0:
             return False
 
-        self.log("[SORA] Upload complete.")
-        return True
+        return (now - last) >= interval
 
-    # ---------------------------------------------------------
+    # --------------------------------------------------
+    def _launch_job(self, job):
+        job_id = job["id"]
+        factory = job.get("factory")
+
+        if not factory:
+            self.log(f"[RSYNC_BOY][WARN] Job {job_id} missing factory")
+            return
+
+        # start with job's local config
+        cfg = job.get("config", {}).copy()
+
+        # pull top-level mysql/ssh creds into job config
+        top_cfg = self.tree_node.get("config", {})
+        if "ssh" in top_cfg:
+            cfg["ssh"] = top_cfg["ssh"]
+            self.log(f"[RSYNC_BOY][_LAUNCH_JOB] Injected SSH creds from top-level config.")
+        if "mysql" in top_cfg:
+            cfg["mysql"] = top_cfg["mysql"]
+            self.log(f"[RSYNC_BOY][_LAUNCH_JOB] Injected MySQL creds from top-level config.")
+
+        self.log(f"[RSYNC_BOY][_LAUNCH_JOB] [DEBUG] final cfg keys: {list(cfg.keys())}")
+
+        context = {"job_id": job_id, "config": cfg}
+
+        self.log(f"[RSYNC_BOY] Launching job '{job_id}' → {factory}")
+        self.thread_launcher.launch(
+            class_path=f"rsync_boy.factory.{factory}",
+            context=context,
+            persist=False,
+        )
+
+        self._last_run[job_id] = time.time()
+
+    # --------------------------------------------------
     def worker(self, config=None, identity: IdentityObject = None):
         try:
             self._emit_beacon()
+            now = time.time()
 
             # check for config updates
-            if config and isinstance(config, dict):
-                self.watch_path = config.get("watch_path", self.watch_path)
-                self.remote_path = config.get("ssh_path", self.remote_path)
-                self.ssh_host = config.get("ssh_host", self.ssh_host)
-                self.ssh_user = config.get("ssh_user", self.ssh_user)
-                self.ssh_port = int(config.get("ssh_port", self.ssh_port))
-                self.auth_type = config.get("auth_type", self.auth_type)
-                self.private_key = config.get("private_key", self.private_key)
-                self.password = config.get("password", self.password)
+            if isinstance(config, dict) and bool(config.get("push_live_config", 0)):
+                self.jobs = config.get("jobs", self.jobs)
                 self.poll_interval = int(config.get("poll_interval", self.poll_interval))
+                self.log("[RSYNC_BOY] Live config updated")
 
-            for fname in os.listdir(self.watch_path):
-                if not fname.lower().endswith((".mp4", ".webm", ".mov", ".mkv")):
+            for job in self.jobs:
+                if not job.get("enabled", False):
                     continue
 
-                fpath = os.path.join(self.watch_path, fname)
-
-                h = self._file_hash(fpath)
-                if h in self.delivered:
-                    continue
-
-                self.log(f"[SORA] New file detected: {fname}")
-
-                if self._rsync_file(fpath):
-                    self.delivered[h] = {
-                        "file": fname,
-                        "hash": h,
-                        "timestamp": int(time.time())
-                    }
-                    self._save_db()
-
-                    # swarm alert
-                    self.alert_operator(f"SORA upload complete → {fname}")
+                if self._job_due(job, now):
+                    self._launch_job(job)
 
         except Exception as e:
-            self.log("[SORA][ERROR]", error=e)
+            self.log("[RSYNC_BOY][ERROR]", error=e)
 
         interruptible_sleep(self, self.poll_interval)
 

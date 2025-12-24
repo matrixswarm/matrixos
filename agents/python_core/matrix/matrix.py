@@ -689,10 +689,12 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
             packet (dict): The raw packet data.
             identity (IdentityObject): The verified identity of the command sender.
         """
-        uid = content.get("target_universal_id")
-        updates = content.get("config", {})
-        push_live_config = content.get("push_live_config", False)
+
         try:
+            updates = content.get("config", {})
+            uid = content.get("target_universal_id")
+            push_live_config = bool(updates.get("push_live_config", False))
+
             if not uid or not updates:
                 self.log("[UPDATE_AGENT][ERROR] Missing target_universal_id or fields.")
                 return

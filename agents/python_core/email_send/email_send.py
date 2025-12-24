@@ -52,7 +52,12 @@ class Agent(BootAgent):
         """Entry point when swarm sends a 'send email' command."""
         try:
             smtp_server = content.get("smtp_server") or self.smtp_server
-            smtp_port = int(content.get("smtp_port", self.smtp_port or 465))
+            raw_port = content.get("smtp_port") or self.smtp_port or 465
+            try:
+                smtp_port = int(raw_port)
+            except (ValueError, TypeError):
+                smtp_port = 465
+
             from_addr = content.get("from") or self.from_address
             to_addr = content.get("to") or self.to_address
             subject = content.get("subject").strip()

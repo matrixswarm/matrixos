@@ -3,12 +3,12 @@
 import sys
 import os
 import threading
-
+import json
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 import time
 from core.python_core.utils.swarm_sleep import interruptible_sleep
-from openai import OpenAI
+from openai import OpenAI, timeout
 from core.python_core.boot_agent import BootAgent
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 
@@ -46,6 +46,8 @@ class Agent(BootAgent):
             self.response_mode = config.get("response_mode", "terse")
             self.client = OpenAI(api_key=self.api_key)
 
+            self.dump_incoming_prompts = bool(config.get("dump_incoming_prompts", False))
+
             self.processed_query_ids = set()
             self.outbox_path = os.path.join(self.path_resolution["comm_path_resolved"], "outbox")
             os.makedirs(self.outbox_path, exist_ok=True)
@@ -54,9 +56,50 @@ class Agent(BootAgent):
         except Exception as e:
             self.log(error=e, block='main_try', level='ERROR')
 
+    def _spawn_service_thread(self, target, *args, **kwargs):
+        t = threading.Thread(
+            target=target,
+            args=args,
+            kwargs=kwargs,
+            daemon=True  # dies automatically with process
+        )
+        t.start()
+
+    def cmd_msg_prompt(self, content, packet, identity: IdentityObject = None):
+        # Dispatch only
+        self._spawn_service_thread(
+            self._cmd_msg_prompt_worker,
+            content,
+            packet,
+            identity
+        )
+
+    def cmd_generate_embeddings(self, content, packet, identity: IdentityObject = None):
+        self._spawn_service_thread(
+            self._cmd_generate_embeddings_worker,
+            content,
+            packet,
+            identity
+        )
+
+    def cmd_label_clusters(self, content, packet, identity: IdentityObject = None):
+        self._spawn_service_thread(
+            self._cmd_label_clusters_worker,
+            content,
+            packet,
+            identity
+        )
 
     def post_boot(self):
         self.log(f"{self.NAME} v{self.AGENT_VERSION} – have a cookie.")
+
+    def dump_messages_check(self, messages):
+        if self.dump_incoming_prompts:
+            try:
+                safe_preview = json.dumps(messages, indent=2)[:4000]
+                self.log(f"[ORACLE][PROMPT_DUMP]\n{safe_preview}", level="INFO")
+            except Exception as e:
+                self.log("[ORACLE][PROMPT_DUMP] Failed to dump prompt", error=e, level="ERROR")
 
     def worker_pre(self):
         """
@@ -75,7 +118,7 @@ class Agent(BootAgent):
         """A one-time hook that runs after the agent's main loops have exited."""
         self.log("[ORACLE] Oracle shutting down. No more prophecies today.")
 
-    def cmd_msg_prompt(self, content, packet, identity: IdentityObject = None):
+    def _cmd_msg_prompt_worker(self, content, packet, identity):
         """
         Oracle analysis using NEW multi-message format only.
         Expected content:
@@ -101,6 +144,7 @@ class Agent(BootAgent):
             query_id = content.get("query_id", 0)
             session_id = content.get("session_id","")
             token = content.get("token", "")
+
 
             # Resolve target uid (for swarm-mode only)
             target_uid = None
@@ -131,17 +175,56 @@ class Agent(BootAgent):
                 self.log(f"[ORACLE] ✂️ Truncating oversized prompt ({total_chars} chars).")
                 messages = messages[:1] + messages[-5:]
 
-            # ---- OpenAI Call ----
-            with self._cfg_lock:
-                client = self.client
-                model = self.model
-                temperature = self.temperature
 
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature
-            ).choices[0].message.content.strip()
+            json_response = bool(content.get("json_response", False))
+            if json_response:
+                system_note = {
+                    "role": "system",
+                    "content": (
+                        "Return ONLY valid JSON. Do not include prose or explanations. "
+                        "Respond with a single JSON array or object that can be parsed directly."
+                    ),
+                }
+                # prepend our instruction
+                messages.insert(0, system_note)
+
+            try:
+                with self._cfg_lock:
+                    client = self.client
+                    model = self.model
+                    temperature = self.temperature
+
+                try:
+
+                    self.dump_messages_check(messages)
+
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        timeout=30
+                    ).choices[0].message.content.strip()
+                except TimeoutError:
+                    self.log("[ORACLE][TIMEOUT] OpenAI call exceeded 30s, aborting.")
+                    return
+                except Exception as e:
+                    self.log("[ORACLE][ERROR] LLM failure", error=e)
+                    return
+
+
+                if json_response:
+                    try:
+                        json.loads(response)
+                        self.log("[ORACLE][JSON] Valid JSON output produced.")
+                    except Exception as je:
+                        self.log(f"[ORACLE][JSON][WARN] Model returned non-JSON: {je}")
+                        import re
+                        match = re.search(r'(\[.*\]|\{.*\})', response, re.S)
+                        response = match.group(1) if match else "[]"
+
+            except Exception as e:
+                self.log("[ORACLE][FATAL] chat completion crashed.", error=e)
+                response = "[]"
 
             if use_callback:
                 self.log(f"[ORACLE] ✅ Completed analysis for Phoenix.")
@@ -191,9 +274,9 @@ class Agent(BootAgent):
                 self.log(f"[ORACLE] Sent {return_handler} reply to {target_uid} for query_id {query_id}")
 
         except Exception as e:
-            self.log("[ORACLE][FATAL] cmd_msg_prompt crashed.", error=e)
+            self.log(error=e, level="ERROR", block="main_try")
 
-    def cmd_generate_embeddings(self, content, packet, identity: IdentityObject = None):
+    def _cmd_generate_embeddings_worker(self, content, packet, identity):
         """
         Handles embedding requests from TrendScout or other agents.
         Expects:
@@ -231,12 +314,23 @@ class Agent(BootAgent):
             if not text:
                 self.log("[ORACLE][ERROR] Empty text for embedding.")
                 return
+            self.log("embedding start")
+            try:
+                self.dump_messages_check(text)
+                # Support both string and list inputs
+                response = self.client.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=text,
+                    timeout=30
+                )
+            except TimeoutError:
+                self.log("[ORACLE][EMBEDDINGS][TIMEOUT] OpenAI call exceeded 30s, aborting.")
+                return
+            except Exception as e:
+                self.log("[ORACLE][EMBEDDINGS][ERROR] LLM failure", error=e)
+                return
 
-            # Support both string and list inputs
-            response = self.client.embeddings.create(
-                model="text-embedding-3-small",
-                input=text
-            )
+            self.log("embedding end")
 
             embeddings = [d.embedding for d in response.data]
 
@@ -281,73 +375,105 @@ class Agent(BootAgent):
         interruptible_sleep(self, 0.5)
 
     def _apply_live_config(self, cfg: dict):
+        """
+        Dynamically applies updated configuration pushed from Phoenix.
+        Supports API key, model, temperature, response mode, and
+        new debug flag: dump_incoming_prompts.
+        """
         try:
             new_key = cfg.get("api_key") or self.api_key
             new_model = cfg.get("model", self.model)
-            new_mode = cfg.get("response_mode", "terse")
+            new_mode = cfg.get("response_mode", self.response_mode)
             new_temperature = cfg.get("temperature", self.temperature)
+            new_dump_flag = bool(cfg.get("dump_incoming_prompts", getattr(self, "dump_incoming_prompts", False)))
 
+            # --- API key reload ---
             if new_key != self.api_key:
                 with self._cfg_lock:
                     self.client = OpenAI(api_key=new_key)
                     self.api_key = new_key
-                    self.log("[ORACLE] API key updated (reloaded client)")
+                    self.log("[ORACLE][LIVE] API key updated and client reloaded")
 
+            # --- Model switch ---
             if new_model != self.model:
                 with self._cfg_lock:
                     self.model = new_model
-                    self.log(f"[ORACLE] Model switched → {new_model}")
+                    self.log(f"[ORACLE][LIVE] Model switched → {new_model}")
 
+            # --- Response mode switch ---
             if new_mode != self.response_mode:
                 with self._cfg_lock:
                     self.response_mode = new_mode
-                    self.log(f"[ORACLE] Response mode switched → {new_mode}")
+                    self.log(f"[ORACLE][LIVE] Response mode switched → {new_mode}")
 
+            # --- Temperature update ---
             if new_temperature != self.temperature:
                 with self._cfg_lock:
                     self.temperature = new_temperature
-                    self.log(f"[ORACLE] Temperature switched → {new_temperature}")
+                    self.log(f"[ORACLE][LIVE] Temperature switched → {new_temperature}")
+
+            # --- Debug flag for prompt dumping ---
+            if new_dump_flag != getattr(self, "dump_incoming_prompts", False):
+                with self._cfg_lock:
+                        self.dump_incoming_prompts = new_dump_flag
+                        self.log(f"[ORACLE][LIVE] 🪣 dump_incoming_prompts set → {self.dump_incoming_prompts}")
 
         except Exception as e:
             self.log("[ORACLE][ERROR] Failed to apply live config", error=e)
 
-    def cmd_label_clusters(self, content, packet, identity:IdentityObject =None):
+    def _cmd_label_clusters_worker(self, content, packet, identity):
 
-        target_uid = None
 
-        if not self.encryption_enabled:
-            # plaintext swarm – target specified directly
-            target_uid = content.get("target_universal_id", False)
-        else:
-            # encrypted swarm – require verified identity
-            if isinstance(identity, IdentityObject) and identity.has_verified_identity():
-                target_uid = identity.get_sender_uid()
+        try:
 
-        if not target_uid:
-            self.log("[ORACLE][ERROR] target_universal_id missing. Cannot respond in swarm mode.")
-            return
+            target_uid = None
 
-        clusters = content.get("clusters", [])
+            if not self.encryption_enabled:
+                # plaintext swarm – target specified directly
+                target_uid = content.get("target_universal_id", False)
+            else:
+                # encrypted swarm – require verified identity
+                if isinstance(identity, IdentityObject) and identity.has_verified_identity():
+                    target_uid = identity.get_sender_uid()
 
-        prompt = "Name each semantic group of tags:\n\n"
-        for i, c in enumerate(clusters):
-            prompt += f"Cluster {i+1}: {', '.join(c['tags'])}\n"
+            if not target_uid:
+                self.log("[ORACLE][ERROR] target_universal_id missing. Cannot respond in swarm mode.")
+                return
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        ).choices[0].message.content
+            clusters = content.get("clusters", [])
 
-        payload = {"labels": response}
+            self.log("clustering start")
+            prompt = "Name each semantic group of tags:\n\n"
+            for i, c in enumerate(clusters):
+                prompt += f"Cluster {i+1}: {', '.join(c['tags'])}\n"
 
-        pk_resp = self.get_delivery_packet("standard.command.packet")
-        pk_resp.set_data({
-            "handler": content.get("return_handler"),
-            "content": payload
-        })
-        self.pass_packet(pk_resp, target_uid)
+            try:
+                self.dump_messages_check(prompt)
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    timeout=30
+                ).choices[0].message.content
+            except TimeoutError:
+                self.log("[ORACLE][CLUSTERS][TIMEOUT] OpenAI call exceeded 30s, aborting.")
+                return
+            except Exception as e:
+                self.log("[ORACLE][CLUSTERS][ERROR] LLM failure", error=e)
+                return
 
+            self.log("clustering done")
+
+            payload = {"labels": response}
+
+            pk_resp = self.get_delivery_packet("standard.command.packet")
+            pk_resp.set_data({
+                "handler": content.get("return_handler"),
+                "content": payload
+            })
+            self.pass_packet(pk_resp, target_uid)
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
 
 if __name__ == "__main__":
     agent = Agent()

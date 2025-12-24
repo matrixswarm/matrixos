@@ -1,5 +1,3 @@
-# Authored by Daniel F MacDonald and ChatGPT aka The Generals
-# Gemini, code enhancements and Docstrings
 import os
 import time
 import traceback
@@ -347,9 +345,19 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
 
             if error:
                 err_str = str(error)
-                self.logger.log(f"{prefix} {msg} : {err_str}", level=level)
                 if include_stack:
+                    # get last traceback frame where the error occurred
+                    tb = traceback.extract_tb(error.__traceback__)
+                    if tb:
+                        last_frame = tb[-1]
+                        filename = os.path.basename(last_frame.filename)
+                        line_no = last_frame.lineno
+                        func = last_frame.name
+                        prefix += f"[{filename}:L{line_no}:{func}]"
+                    # include traceback in debug log
                     self.logger.log(traceback.format_exc(), level="DEBUG")
+                self.logger.log(f"{prefix} {msg} : {err_str}", level=level)
+
             else:
                 self.logger.log(f"{prefix} {msg}", level=level)
 
