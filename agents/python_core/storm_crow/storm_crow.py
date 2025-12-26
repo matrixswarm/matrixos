@@ -69,12 +69,14 @@ class Agent(BootAgent):
                 self._private_config = config
                 self._initialized_from_tree = False
 
-            if not self._initialized_from_tree:
+            if self.is_agent_tree_loaded and not self._initialized_from_tree:
                 self.cmd_update_agent_config()
 
+            alerts= {}
+            if self.is_agent_tree_loaded:
+                alerts = self.fetch_alerts()
 
-            alerts = self.fetch_alerts()
-            if not alerts:
+            if self.is_agent_tree_loaded and (not alerts):
                 self.log("[STORMCROW] ✅ NWS returned no alerts.")
             for item in alerts:
                 alert_id = item.get("id")
@@ -103,8 +105,10 @@ class Agent(BootAgent):
 
         except Exception as e:
             self.log(error=e, block="main_try")
-
-        interruptible_sleep(self, self.interval)
+        if self.is_agent_tree_loaded:
+            interruptible_sleep(self, self.interval)
+        else:
+            interruptible_sleep(self, 20)
 
     def fetch_alerts(self):
         try:
@@ -147,13 +151,14 @@ class Agent(BootAgent):
 
         pk1.set_packet(pk2, "content")
 
-        alert_nodes = self.get_nodes_by_role(self._private_config.get("hive_to_alert", "hive.alert"))
-        if not alert_nodes:
+        endpoints = self.get_nodes_by_role(self._private_config.get("alert_to_role", "hive.alert"))
+        if not endpoints:
             self.log("No alert-compatible agents found.")
             return
 
-        for node in alert_nodes:
-            self.pass_packet(pk1, node["universal_id"])
+        for ep in endpoints:
+            pk1.set_payload_item("handler", ep.get_handler())
+            self.pass_packet(pk1, ep.get_universal_id())
 
     def resolve_zip_to_latlon(self, zip_code):
         try:

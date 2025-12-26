@@ -21,6 +21,7 @@ class Agent(BootAgent, AgentSummaryMixin):
         try:
             self.name = "ApacheSentinel"
             cfg = self.tree_node.get("config", {})
+
             self.interval = cfg.get("check_interval_sec", 10)
             self.service_name = cfg.get("service_name", "httpd")  # or "httpd" on RHEL
             self.ports = cfg.get("ports", [80, 443])
@@ -181,7 +182,7 @@ class Agent(BootAgent, AgentSummaryMixin):
             })
 
             self.log_proto(
-                f"ALERT dispatched for user { self.command_line_args.get("universal_id", "unknown")} from {server_ip}",
+                f'ALERT dispatched for user {self.command_line_args.get("universal_id", "unknown")} from {server_ip}',
                 level="WARN",
                 block="DROP_ALERT"
             )

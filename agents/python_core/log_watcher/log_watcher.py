@@ -1,7 +1,6 @@
 # Authored by Daniel F MacDonald and ChatGPT-5 aka The Generals
 # ChatGPT-3 Docstrings
 import os, sys, time, json, uuid, importlib, threading
-from Crypto.PublicKey import RSA
 
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
@@ -19,9 +18,13 @@ class Agent(BootAgent):
         try:
             cfg = self.tree_node.get("config", {})
 
-            self.AGENT_VERSION = "2.0.0"
             self._interval = cfg.get("check_interval_sec", 30)
-            self._patrol_interval = cfg.get("patrol_interval_hours", 6) * 3600
+            self._emit_beacon = self.check_for_thread_poke("worker", timeout=self._interval * 2,  emit_to_file_interval=10)
+
+
+            self.AGENT_VERSION = "2.0.0"
+
+            self._patrol_interval = int(cfg.get("patrol_interval_hours", 6)) * 3600
             self._last_patrol = 0
             self.enable_oracle = bool(cfg.get("enable_oracle", 0))
             self.oracle_role = cfg.get("oracle_role", "hive.oracle")
@@ -37,7 +40,6 @@ class Agent(BootAgent):
 
             self.oracle_stack = {}
 
-            self._emit_beacon = self.check_for_thread_poke("worker", timeout=self._interval * 2, emit_to_file_interval=10)
 
         except Exception as e:
             self.log(error=e, block="main_try")
@@ -99,7 +101,7 @@ class Agent(BootAgent):
             try:
                 key = name.strip().lower()
                 self.log(
-                    f"[LOG-WATCHER][COLLECT] → {name} | paths={cfg.get("paths",[])} | max_lines={cfg.get("max_lines",[])} | rotate_depth={cfg.get("rotate_depth",[])}"
+                    f'[LOG-WATCHER][COLLECT] → {name} | paths={cfg.get("paths",[])} | max_lines={cfg.get("max_lines",[])} | rotate_depth={cfg.get("rotate_depth",[])}'
                 )
 
                 if limit_to and key not in limit_to:
