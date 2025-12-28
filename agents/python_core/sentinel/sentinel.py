@@ -48,10 +48,10 @@ class Agent(BootAgent):
         super().__init__()
 
         config = self.tree_node.get("config", {})
-        self.matrix_secure_verified=bool(config.get("matrix_secure_verified",0))
+
+        #self.matrix_secure_verified=bool(config.get("matrix_secure_verified",0))
         self.watching = config.get("watching", "the Matrix")
         self.universal_id_under_watch = config.get("universal_id_under_watch", False)
-        self.target_node = None
         self._last_run_log=0
         self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
         self._emit_beacon_watch_cycle = self.check_for_thread_poke("watch_cycle", timeout=60, emit_to_file_interval=10)
@@ -60,7 +60,9 @@ class Agent(BootAgent):
         """
         A one-time setup hook that starts the main monitoring thread.
         """
-        self.log(f"[SENTINEL] Sentinel booted. Monitoring: {self.watching}")
+        if self.universal_id_under_watch:
+            self.log(f"[SENTINEL] Sentinel booted. Monitoring: {self.watching}")
+
         # Start watch thread
         threading.Thread(target=self.watch_cycle, daemon=True).start()
 

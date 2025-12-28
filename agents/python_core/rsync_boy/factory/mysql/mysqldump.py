@@ -1,6 +1,5 @@
-# agents/python_core/rsync_boy/factory/mysql/mysqldump.py
+# Authored by Daniel F MacDonald and ChatGPT 5.1 aka The Generals
 import os
-import re
 import shlex
 import json
 import time
@@ -10,6 +9,8 @@ import tempfile
 import subprocess
 from dataclasses import dataclass
 
+#MAKE SURE YOU INSTALL SSHPASS
+#dnf install -y sshpass or whatever linux vers you use
 
 @dataclass
 class SSHCreds:
@@ -20,8 +21,7 @@ class SSHCreds:
     private_key_pem: str | None = None
     private_key: str | None = None   # optional path fallback
     password: str | None = None
-    strict_host_key: bool = False    # if True, do not auto-accept new host keys
-
+    password_env: str | None = None
 
 class MySQLDumpJob:
     """
@@ -29,7 +29,6 @@ class MySQLDumpJob:
     Contract:
       ctx = shared["context"] = { "job_id": str, "credentials": dict, "config": dict }
     """
-
     def __init__(self, log, shared):
         self.log = log
         self.shared = shared
@@ -95,15 +94,20 @@ class MySQLDumpJob:
         if not host or not user:
             raise ValueError("Missing SSH credentials: ssh.host and ssh.username required")
 
+        pwd = ssh.get("password") or ""
+        env_name = ssh.get("password_env")
+
+        if env_name and pwd:
+            os.environ[env_name] = pwd
+
         return SSHCreds(
             ssh_host=host.strip(),
             ssh_user=user.strip(),
             ssh_port=port,
-            auth_type=ssh.get("auth_type") or "priv",
             private_key_pem=ssh.get("private_key_pem") or ssh.get("private_key"),
             private_key=ssh.get("private_key"),
-            password=ssh.get("password"),
-            strict_host_key=bool(ssh.get("strict_host_key") or ssh.get("trusted_host_fingerprint"))
+            auth_type=ssh.get("auth_type") or "password",
+            password_env=env_name,
         )
 
     def _validate_and_normalize_cfg(self, cfg: dict) -> dict:
@@ -259,159 +263,77 @@ class MySQLDumpJob:
     # ---------------------------------------------------------
     # SSH / rsync (hardened)
     # ---------------------------------------------------------
-    def _ssh_common_opts(self, creds: SSHCreds) -> list[str]:
-        opts = []
-        if creds.strict_host_key:
-            opts += ["-o", "StrictHostKeyChecking=yes"]
-        else:
-            # accept-new is sane for automation; change if you enforce known_hosts
-            opts += ["-o", "StrictHostKeyChecking=accept-new"]
-        return opts
 
-    def _start_ssh_agent(self, creds: SSHCreds) -> dict:
-        """
-        Start a temporary ssh-agent, add private key via stdin (PEM), return env.
-        Key NEVER touches disk.
-        """
-        if creds.auth_type not in ("priv", "key", "private"):
-            return os.environ.copy()
+    def _ssh_common_opts(self) -> list[str]:
+        return [
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+        ]
 
-        if not creds.private_key_pem and not creds.private_key:
-            raise ValueError("auth_type=priv requires private_key_pem (preferred) or private_key path")
-
-        env = os.environ.copy()
-        agent = subprocess.run(["ssh-agent", "-s"], capture_output=True, text=True, check=True)
-
-        # Parse env exports from ssh-agent output
-        for line in agent.stdout.splitlines():
-            if line.startswith("SSH_AUTH_SOCK=") or line.startswith("SSH_AGENT_PID="):
-                kv = line.split(";", 1)[0]
-                k, v = kv.split("=", 1)
-                env[k] = v
-
-        # Add key
-        if creds.private_key_pem:
-            subprocess.run(["ssh-add", "-"], input=creds.private_key_pem, text=True, env=env, check=True)
-        else:
-            # Path fallback
-            subprocess.run(["ssh-add", creds.private_key], env=env, check=True)
-
-        return env
-
-    def _kill_ssh_agent(self, env: dict):
-        try:
-            pid = env.get("SSH_AGENT_PID")
-            if pid:
-                subprocess.run(["kill", pid], check=False)
-        except Exception:
-            pass
+    def _write_temp_key(self, pem: str) -> str:
+        fd, path = tempfile.mkstemp(prefix="sshkey_")
+        with os.fdopen(fd, "w") as f:
+            f.write(pem.strip() + "\n")
+        os.chmod(path, 0o600)
+        return path
 
     def _remote_mkdir(self, creds: SSHCreds, remote_path: str):
-        env = None
-        try:
-            if creds.auth_type in ("password", "pass"):
-                self._require_binary("sshpass")
-                cmd = [
-                    "sshpass", "-p", creds.password or "",
-                    "ssh", "-p", str(creds.ssh_port),
-                    *self._ssh_common_opts(creds),
-                    f"{creds.ssh_user}@{creds.ssh_host}",
-                    f"mkdir -p {shlex.quote(remote_path)}"
-                ]
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                return
+        cmd = [
+            "sshpass", "-p", creds.password or os.getenv(creds.password_env, ""),
+            "ssh",
+            "-p", str(creds.ssh_port),
+            *self._ssh_common_opts(),
+            f"{creds.ssh_user}@{creds.ssh_host}",
+            f"mkdir -p {shlex.quote(remote_path)}"
+        ]
 
-            env = self._start_ssh_agent(creds)
-            cmd = [
-                "ssh", "-p", str(creds.ssh_port),
-                *self._ssh_common_opts(creds),
-                f"{creds.ssh_user}@{creds.ssh_host}",
-                f"mkdir -p {shlex.quote(remote_path)}"
-            ]
-            subprocess.run(cmd, check=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-        finally:
-            if env and env.get("SSH_AGENT_PID"):
-                self._kill_ssh_agent(env)
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
 
     def _rsync_upload(self, creds: SSHCreds, local_file: str, remote_path: str):
         if not os.path.exists(local_file):
             raise FileNotFoundError(local_file)
 
+        password = creds.password or os.getenv(creds.password_env, "")
+
         remote = f"{creds.ssh_user}@{creds.ssh_host}:{remote_path.rstrip('/')}/"
 
-        # Use stable ssh options
-        ssh_cmd = ["ssh", "-p", str(creds.ssh_port), *self._ssh_common_opts(creds)]
+        cmd = [
+            "sshpass", "-p", password,
+            "rsync", "-avz", "--partial",
+            "-e", f"ssh -p {creds.ssh_port} {' '.join(self._ssh_common_opts())}",
+            local_file,
+            remote
+        ]
 
-        env = None
-        try:
-            if creds.auth_type in ("password", "pass"):
-                self._require_binary("sshpass")
-                cmd = [
-                    "sshpass", "-p", creds.password or "",
-                    "rsync", "-avz", "--partial",
-                    "-e", " ".join(ssh_cmd),
-                    local_file,
-                    remote
-                ]
-                p = subprocess.run(cmd, capture_output=True, text=True)
-            else:
-                env = self._start_ssh_agent(creds)
-                cmd = [
-                    "rsync", "-avz", "--partial",
-                    "-e", " ".join(ssh_cmd),
-                    local_file,
-                    remote
-                ]
-                p = subprocess.run(cmd, capture_output=True, text=True, env=env)
-
-            if p.returncode != 0:
-                err = (p.stderr or "")[-3000:]
-                raise RuntimeError(f"rsync failed (code={p.returncode}): {err}")
-
-        finally:
-            if env and env.get("SSH_AGENT_PID"):
-                self._kill_ssh_agent(env)
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        if p.returncode != 0:
+            err = (p.stderr or "")[-3000:]
+            raise RuntimeError(f"rsync failed (code={p.returncode}): {err}")
 
     def _remote_prune(self, creds: SSHCreds, remote_path: str, prune_cfg: dict):
-        """
-        prune_cfg:
-          { "keep_days": 7, "pattern": "*.sql.gz" }
-        """
         keep_days = int(prune_cfg.get("keep_days", 0))
-        pattern = (prune_cfg.get("pattern") or "*.sql*").strip()
-
         if keep_days <= 0:
             return
+
+        pattern = (prune_cfg.get("pattern") or "*.sql*").strip()
 
         cmd_str = (
             f"find {shlex.quote(remote_path)} -type f "
             f"-name {shlex.quote(pattern)} -mtime +{keep_days} -delete"
         )
 
-        env = None
-        try:
-            if creds.auth_type in ("password", "pass"):
-                self._require_binary("sshpass")
-                cmd = [
-                    "sshpass", "-p", creds.password or "",
-                    "ssh", "-p", str(creds.ssh_port),
-                    *self._ssh_common_opts(creds),
-                    f"{creds.ssh_user}@{creds.ssh_host}",
-                    cmd_str
-                ]
-                subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return
+        cmd = [
+            "sshpass", "-p", creds.password or os.getenv(creds.password_env, ""),
+            "ssh",
+            "-p", str(creds.ssh_port),
+            *self._ssh_common_opts(),
+            f"{creds.ssh_user}@{creds.ssh_host}",
+            cmd_str
+        ]
 
-            env = self._start_ssh_agent(creds)
-            cmd = [
-                "ssh", "-p", str(creds.ssh_port),
-                *self._ssh_common_opts(creds),
-                f"{creds.ssh_user}@{creds.ssh_host}",
-                cmd_str
-            ]
-            subprocess.run(cmd, check=False, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        finally:
-            if env and env.get("SSH_AGENT_PID"):
-                self._kill_ssh_agent(env)
+        subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

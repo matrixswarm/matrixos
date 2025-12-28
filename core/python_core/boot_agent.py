@@ -137,9 +137,6 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
         except Exception as e:
             self.log(f"[BOOT] matrix_pub is missing. Trust cannot be verified.", error=e, block="optional_fingerprint")
 
-
-        # Convert to objects
-
         try:
             self.matrix_pub_obj = serialization.load_pem_public_key(self.matrix_pub.encode())
         except Exception as e:

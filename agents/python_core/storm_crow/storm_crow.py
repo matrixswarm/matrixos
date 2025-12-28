@@ -3,6 +3,8 @@ import sys
 import os
 import time
 import requests
+import re
+import unicodedata
 
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
@@ -86,10 +88,17 @@ class Agent(BootAgent):
                 area = props.get("areaDesc")
                 headline = props.get("headline")
                 issued = props.get("sent")
-                description = props.get("description", "")
-                instruction = props.get("instruction", "")
+                description = self.sanitize_alert_text(props.get("description", ""), 1500)
+                instruction = self.sanitize_alert_text(props.get("instruction", ""), 1000)
+                headline = self.sanitize_alert_text(props.get("headline", ""), 300)
+                area = self.sanitize_alert_text(props.get("areaDesc", ""), 300)
+                event = self.sanitize_alert_text(props.get("event", ""), 100)
+                severity = self.sanitize_alert_text(props.get("severity", ""), 50)
 
-                msg = f"{event} | {severity} | {area}\n📰 {headline}\n"
+                msg = (
+                    f"{event} | {severity} | {area}\n"
+                    f"📰 {headline}\n"
+                )
                 if description:
                     msg += f"📖 {description}\n"
                 if instruction:
@@ -98,9 +107,9 @@ class Agent(BootAgent):
 
                 if alert_id not in self.last_alert_ids:
                     self.last_alert_ids.add(alert_id)
-                    msg = f"{event} | {severity} | {area}\n📰 {headline}\n📅 Issued: {issued}"
                     self.log(f"[STORMCROW] ⚠️ NEW ALERT: {event} | {severity} | {area}")
                     self.log(f"[STORMCROW] 📰 {headline} (Issued: {issued})")
+                    # Send FULL sanitized alert
                     self.alert_operator(event, msg)
 
         except Exception as e:
@@ -159,6 +168,22 @@ class Agent(BootAgent):
         for ep in endpoints:
             pk1.set_payload_item("handler", ep.get_handler())
             self.pass_packet(pk1, ep.get_universal_id())
+
+    def sanitize_alert_text(self, text, max_len=1200):
+        if not isinstance(text, str):
+            return ""
+
+        # Normalize unicode (kills RTL tricks)
+        text = unicodedata.normalize("NFKC", text)
+
+        # Remove control characters
+        text = re.sub(r"[\x00-\x1F\x7F]", "", text)
+
+        # Collapse excessive whitespace
+        text = re.sub(r"\s{3,}", "  ", text)
+
+        # Hard length cap
+        return text.strip()[:max_len]
 
     def resolve_zip_to_latlon(self, zip_code):
         try:
