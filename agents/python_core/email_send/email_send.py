@@ -143,10 +143,51 @@ class Agent(BootAgent):
 
             if encryption == "SSL":
                 self.log(f"[EMAIL][CONNECT] Using SSL on {smtp_server}:{smtp_port}")
-                with smtplib.SMTP_SSL(smtp_server, smtp_port, context=context, timeout=10) as server:
-                    server.login(from_addr, password)
-                    server.send_message(msg)
-                    self.log("[EMAIL][SEND] ✅ Sent via SSL.")
+
+                #  STEP 1—Test DNS resolution
+                try:
+                    self.log(f"[EMAIL][DNS] Resolving hostname: {smtp_server}")
+                    resolved = ssl.get_server_certificate((smtp_server, smtp_port))
+                    self.log(f"[EMAIL][DNS] Host resolved OK.")
+                except Exception as e:
+                    self.log("[EMAIL][DNS][ERROR] Hostname resolution failed", error=e)
+                    raise
+
+                #  STEP 2—Socket reachability test BEFORE smtplib wraps it
+                import socket
+                try:
+                    self.log(f"[EMAIL][SOCKET] Testing TCP connect to {smtp_server}:{smtp_port}")
+                    sock = socket.create_connection((smtp_server, smtp_port), timeout=10)
+                    sock.close()
+                    self.log("[EMAIL][SOCKET] TCP connection succeeded.")
+                except Exception as e:
+                    self.log("[EMAIL][SOCKET][ERROR] TCP connection failed", error=e)
+                    raise
+
+                #  STEP 3—Try SSL wrapper handshake alone
+                try:
+                    self.log("[EMAIL][SSL] Starting SSL handshake test...")
+                    with smtplib.SMTP_SSL(smtp_server, smtp_port, context=context, timeout=10) as test:
+                        self.log("[EMAIL][SSL] Handshake OK (pre-login).")
+                except Exception as e:
+                    self.log("[EMAIL][SSL][HANDSHAKE_ERROR] SSL handshake failed", error=e)
+                    raise
+
+                #  STEP 4—If handshake works, try login explicitly
+                try:
+                    self.log(f"[EMAIL][LOGIN] Attempting login as {from_addr}")
+                    with smtplib.SMTP_SSL(smtp_server, smtp_port, context=context, timeout=10) as server:
+                        server.login(from_addr, password)
+                        self.log("[EMAIL][LOGIN] Login OK. Sending message...")
+                        server.send_message(msg)
+                        self.log("[EMAIL][SEND] Email successfully sent via SSL.")
+                except smtplib.SMTPAuthenticationError as auth_err:
+                    self.log("[EMAIL][AUTH_ERROR] SMTP authentication failed", error=auth_err)
+                    raise
+                except Exception as e:
+                    self.log("[EMAIL][ERROR] Unknown send failure", error=e)
+                    raise
+
 
             elif encryption == "STARTTLS":
                 self.log(f"[EMAIL][CONNECT] Using STARTTLS on {smtp_server}:{smtp_port}")

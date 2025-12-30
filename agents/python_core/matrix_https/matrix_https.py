@@ -180,10 +180,10 @@ class Agent(BootAgent):
             if not (1 <= self.port <= 65535):
                 raise ValueError(f"Invalid port number: {self.port}. Port must be in the range 1–65535.")
 
-            # track expected client SPKI pin (not enforced)
+            # track expected client SPKI pin (it is enforced)
             self._expected_peer_spki = client_cert.get("spki_pin")
 
-            # Optionally load remote_pubkey for packet signature auth
+            # load remote_pubkey for packet signature auth
             self._signing_keys = security.get("signing", {})
             self._has_signing_keys = bool(self._signing_keys.get('privkey')) and bool(self._signing_keys.get('remote_pubkey'))
 

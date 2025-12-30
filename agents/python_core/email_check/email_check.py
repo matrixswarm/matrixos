@@ -70,6 +70,8 @@ class Agent(BootAgent):
                 "incoming_encryption": email_cfg.get("incoming_encryption", "SSL"),
             }}
 
+            self.accounts = self._normalize_accounts(self.accounts)
+
             #poll interval
             self._interval = int(cfg.get("interval_sec", 30))
             self._poll_interval = int(cfg.get("poll_interval", 300))
@@ -174,7 +176,7 @@ class Agent(BootAgent):
                         accounts = data.get("accounts", {})
                         if accounts:
                             with self._accounts_lock:
-                                self.accounts = accounts
+                                accounts = self._normalize_accounts(accounts)
                                 self.log(f"[EMAIL_CHECK] 🔄 Reloaded {len(accounts)} account(s) from accounts.json.aes.")
                         else:
                             with self._accounts_lock:
@@ -265,6 +267,34 @@ class Agent(BootAgent):
         return self._aes.decrypt(ct)
 
     # ---------- IMAP helpers ----------
+    def _normalize_imap_username(self, raw_user: str, cfg: Dict[str, Any]) -> str:
+        u = (raw_user or "").strip()
+        if not u:
+            return ""
+
+        if "@" in u:
+            # canonicalize just a bit: trim spaces; keep case if you want
+            local, domain = u.split("@", 1)
+            return f"{local.strip()}@{domain.strip().lower()}"  # lower domain is safe
+
+        # Prefer explicit domain in config (cleanest)
+        domain = (cfg.get("incoming_domain") or "").strip().lower()
+        if not domain:
+            # Fallback: infer from server hostname (only safe for your “mail.dragoart.com” style)
+            host = (cfg.get("incoming_server") or "").strip().lower()
+            if host.startswith("mail."):
+                host = host[5:]
+            parts = host.split(".")
+            domain = ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+        return f"{u}@{domain}"
+
+    def _normalize_accounts(self, accounts: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        for serial, cfg in (accounts or {}).items():
+            cfg["incoming_username"] = self._normalize_imap_username(cfg.get("incoming_username", ""), cfg)
+        return accounts
+
+
     def _imap_connect(self, cfg: Dict[str, Any]) -> imaplib.IMAP4:
         host = cfg.get("incoming_server")
         port = int(cfg.get("incoming_port") or 143)
@@ -291,7 +321,7 @@ class Agent(BootAgent):
                 code = "CONN_FAILED"
             else:
                 code = "IMAP_ERROR"
-            self.log(f"[EMAIL_CHECK][ERROR] Login failed ({code}) for {user}@{host}: {e}")
+            self.log(f"[EMAIL_CHECK][ERROR] Login failed ({code}) for user='{user}' host='{host}': {e}")
             raise RuntimeError(code)
 
         except (socket.gaierror, socket.timeout) as e:
@@ -624,15 +654,26 @@ class Agent(BootAgent):
 
         self.crypto_reply(self._swarm_feed_alert_role, payload)
 
-    def cmd_check_email(self, content, packet, identity=None) :
-        try:
-            serial = content.get("serial")
-            self.log(f"Checking email for account {serial}...")
-            #self._poll_all_accounts_once(serial)
-            self._force_poll_now = True
-            self.log(f"Email check complete for account {serial}...")
-        except Exception as e:
-            self.log(error=e)
+    def cmd_check_email(self, content, packet, identity=None):
+        serial = content.get("serial")
+        self.log(f"[EMAIL_CHECK] Checking email for account {serial}...")
+
+        cfg = self.accounts.get(serial)
+        if not cfg:
+            self.log(f"[EMAIL_CHECK][ERROR] Unknown account serial {serial}")
+            return
+
+        result = self._poll_account_once(serial, cfg)
+        self.log(f"[EMAIL_CHECK] Email check result for {serial}: {result}")
+
+        # send result back to UI
+        session_id = content.get("session_id")
+        if session_id:
+            self.crypto_reply(
+                response_handler="check_mail.cmd_check_email",
+                payload={"status": "ok", "serial": serial, "result": result},
+                session_id=session_id
+            )
 
     def cmd_retrieve_email(self, content, packet, identity=None):
         try:
@@ -828,6 +869,7 @@ class Agent(BootAgent):
             new_data = content.get("data", {})
             if not isinstance(new_data, dict):
                 raise ValueError("Invalid data format — expected dict.")
+            new_data = self._normalize_accounts(new_data)
             self._save_accounts_file({"accounts": new_data})
             self.log(f"[EMAIL_CHECK] ✅ Updated accounts.json.aes from Phoenix with {len(new_data)} account(s).")
             return {"status": "ok", "updated": len(new_data)}
