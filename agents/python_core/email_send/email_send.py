@@ -37,7 +37,9 @@ class Agent(BootAgent):
         super().__init__()
 
         try:
-            config = self.tree_node.get("config", {}).get("email",{})
+            cfg = self.tree_node.get("config", {})
+            config = cfg.get("smtp", {}) or cfg.get("mail", {})
+
             self.smtp_server = config.get("smtp_server")  # matches your directive
             self.smtp_port = config.get("smtp_port")
             self.from_address = config.get("smtp_username")  # sender's email

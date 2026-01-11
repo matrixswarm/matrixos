@@ -299,7 +299,7 @@ class Agent(BootAgent):
                     "timestamp": timestamp,
                     **geo
                 }
-
+                self.log(f"1  {time.time()}")
                 self.drop_alert(alert_data)
                 self.persist(alert_data)
 
@@ -325,6 +325,7 @@ class Agent(BootAgent):
                     **geo
                 }
 
+                self.log(f"2  {time.time()}")
                 self.drop_alert(alert_data)
                 self.persist(alert_data)
 

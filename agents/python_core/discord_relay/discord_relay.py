@@ -36,8 +36,9 @@ class Agent(BootAgent):
 
         # Local config for this agent
         config = self.directives.get("config", {})
-        self.token = config.get("bot_token")
-        channel_id = config.get("channel_id")
+        discord = config.get("discord", {}) or config
+        self.token = discord.get("bot_token")
+        channel_id = discord.get("channel_id")
         if channel_id is not None:
             self.channel_id = int(channel_id)
         else:

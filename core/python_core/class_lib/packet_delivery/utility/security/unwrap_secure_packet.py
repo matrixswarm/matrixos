@@ -41,7 +41,7 @@ def unwrap_secure_packet(outer_packet: dict, remote_pubkey, local_privkey, logge
                 logger(f"[SECURE][REJECT] Signature verification failed: {type(e).__name__} – {e}")
             return False
 
-        # Decrypt or allow plaintext
+        # Get the contents of the inner packet
         inner = outer_content.get("content")
 
         # decrypt it
@@ -51,7 +51,6 @@ def unwrap_secure_packet(outer_packet: dict, remote_pubkey, local_privkey, logge
                 inner = json.loads(inner)
 
         except Exception as e:
-
             if logger:
                 logger(f"[SECURE][REJECT] AES decrypt failed or malformed JSON: {e}")
             return False

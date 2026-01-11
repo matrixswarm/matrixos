@@ -399,7 +399,7 @@ class Agent(BootAgent):
                     self.log(f"{inner}")
 
                 # 8) All gates passed — relay to Matrix
-                self.log(f"[MATRIX-HTTPS][RELAY] cmd_the_source from {ip}")
+                self.log(f"[MATRIX-HTTPS][RELAY] {ip} → cmd_the_source")
 
                 pk = self.get_delivery_packet("standard.command.packet", new=True)
                 pk.set_data({'handler': "cmd_the_source", "content":matrix_packet})  # relay the verified inner command

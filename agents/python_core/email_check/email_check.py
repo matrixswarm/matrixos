@@ -56,7 +56,7 @@ class Agent(BootAgent):
             cfg = self.tree_node.get("config", {}) or {}
 
             # --- Extract incoming email config directly from deployment ---
-            email_cfg = cfg.get("email", {})
+            email_cfg = cfg.get("imap", {}) or cfg.get("mail", {})
 
             # live account set keyed by serial -> config dict
 

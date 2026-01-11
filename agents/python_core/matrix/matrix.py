@@ -274,12 +274,25 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
         """
         try:
 
-            unwrapped = unwrap_secure_packet(content, self._signing_keys["remote_pubkey"], self._signing_keys.get("privkey"), logger=self.log)
-            if not unwrapped:
-                self.log(f"[GATE] ❌ Secure unwrap failed or invalid structure.")
+            uid = None
+            if not self.encryption_enabled:
+                uid = content.get("universal_id", False)  # swarm running in plaintext mode
+
+            else:
+                # reject invalid or missing identity
+                if isinstance(identity, IdentityObject) and identity.has_verified_identity():
+                     uid = identity.get_sender_uid()
+
+            if not uid:
+                self.log("[THE_SOURCE][ERROR] Missing universal_id.")
                 return
 
-            self.log(f"[GATE] Signature accepted.")
+            unwrapped = unwrap_secure_packet(content, self._signing_keys["remote_pubkey"], self._signing_keys.get("privkey"), logger=self.log)
+            if not unwrapped:
+                self.log(f"[GATE] ❌ Secure unwrap failed or invalid structure. Sender: {uid}")
+                return
+
+            self.log(f"[GATE] Signature accepted from {uid}.")
 
             # Gatekeeper: only allow commands from inside
             inner_handler = unwrapped.get("handler")
@@ -1125,7 +1138,6 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
                     self.log(f"[RESTART][ABORT] {target_universal_id} has locked descendant '{cid}'. Aborting restart.")
                     return
 
-
             # Scope
             recurse_children = False
             if full_flag:
@@ -1172,8 +1184,6 @@ class Agent(BootAgent, ReapStatusHandlerMixin):
 
         except Exception as e:
             self.log(error=e, block="main_try", level="ERROR")
-
-
 
     #checks everyone's tree against Matrix's agent_tree_master, using a hash of the agents tree
     #this also ensures services are updated for agents added and removed

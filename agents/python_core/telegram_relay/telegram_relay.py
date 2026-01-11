@@ -15,8 +15,11 @@ class Agent(BootAgent):
 
         config = self.tree_node.get("config", {})
 
-        self.token = config.get("bot_token")
-        self.chat_id = config.get("chat_id")
+        config = self.tree_node.get("config", {})
+        telegram = config.get("telegram", {}) or config
+
+        self.token = telegram.get("bot_token")
+        self.chat_id = telegram.get("chat_id")
         self.comm_folder = config.get("watch_comm", "mailman-1")
         path = os.path.join(self.path_resolution["comm_path_resolved"], "outgoing")
         os.makedirs(path, exist_ok=True)

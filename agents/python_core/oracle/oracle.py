@@ -8,7 +8,7 @@ sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 import time
 from core.python_core.utils.swarm_sleep import interruptible_sleep
-from openai import OpenAI, timeout
+from openai import OpenAI
 from core.python_core.boot_agent import BootAgent
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 
@@ -39,8 +39,9 @@ class Agent(BootAgent):
             self._cfg_lock = threading.Lock()
 
             config = self.tree_node.get("config", {})
+            openai = config.get("openai", {}) or config
 
-            self.api_key = config.get("api_key")
+            self.api_key = openai.get("api_key")
             self.model = config.get("model", "gpt-3.5-turbo")
             self.temperature = config.get("temperature",0)
             self.response_mode = config.get("response_mode", "terse")

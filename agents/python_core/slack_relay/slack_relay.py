@@ -16,7 +16,9 @@ class Agent(BootAgent):
         super().__init__()
 
         config = self.tree_node.get("config", {})
-        self.webhook_url = config.get("webhook_url")  # Slack webhook URL
+        slack = config.get("slack", {}) or config
+
+        self.webhook_url = slack.get("webhook_url")  # Slack webhook URL
 
         comm_path = self.path_resolution["comm_path_resolved"]
         self.watch_path = os.path.join(comm_path, "incoming")
