@@ -134,7 +134,6 @@ class ThreadLauncher:
         Monitor persistent threads.
         Call this from the parent agent worker loop.
         """
-
         now = time.time()
 
         try:
@@ -170,7 +169,6 @@ class ThreadLauncher:
         """
         Signal a thread to stop gracefully.
         """
-
         try:
             with self._lock:
                 shared = self._shared_state.get(thread_id)
@@ -248,3 +246,30 @@ class ThreadLauncher:
                 level="ERROR",
             )
             raise
+
+    # --------------------------------------------------
+    def get_shared(self, thread_id: str):
+        """
+        Return the shared context dictionary for a running thread.
+        Used by queue managers and other controllers that need to
+        inject or read data after launch.
+        """
+        try:
+            with self._lock:
+                shared = self._shared_state.get(thread_id)
+                if not shared:
+                    self.log(
+                        f"get_shared: unknown thread {thread_id}",
+                        block="thread_get_shared",
+                        level="WARN",
+                    )
+                    return None
+                return shared
+        except Exception as e:
+            self.log(
+                error=e,
+                block="thread_get_shared",
+                level="ERROR",
+            )
+            return None
+

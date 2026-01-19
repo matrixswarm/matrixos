@@ -2,6 +2,7 @@
 # Gemini, code enhancements and Docstrings
 import sys
 import os
+
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 from flask import Response
@@ -18,7 +19,8 @@ from core.python_core.class_lib.packet_delivery.utility.security.packet_size imp
 from core.python_core.utils import crypto_utils
 from core.python_core.utils.swarm_sleep import interruptible_sleep
 from werkzeug.serving import make_server
-from core.python_core.utils.crypto_utils import encrypt_with_ephemeral_aes,  sign_data, pem_fix
+from core.python_core.utils.crypto_utils import pem_fix
+from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
 class CustomRequestHandler(WSGIRequestHandler):
     """
     A custom WSGI request handler that retrieves the client's TLS certificate.
@@ -87,9 +89,6 @@ class Agent(BootAgent):
         post_boot():
             Logs a message indicating the agent is fully operational.
 
-        process_command(data):
-            A placeholder method for processing delegated commands.
-
         worker_pre():
             A hook that runs once before the main worker loop.
 
@@ -143,13 +142,22 @@ class Agent(BootAgent):
         configures the Flask application and its routes, preparing the
         HTTPS server for operation.
         """
-        self.AGENT_VERSION = "2.0.0"
+        self.AGENT_VERSION = "2.4.0"
         self.app = Flask(__name__)
 
         try:
 
             config = self.tree_node.get("config", {})
+
+            # allow incoming packets (True=Deny, False=Allow)
+            self.lockdown_state = config.get('lockdown_state', False)  # whether the agent currently accepts external connections (False=accepting packets, True=not accepting packets)
+            self.lockdown_time = config.get('lockdown_time', 0)  # seconds to stay offline before auto-reopen (0 = none)
+            self.lockdown_expires = 0  # epoch timestamp when lockdown ends
+
             self.allowlist_ips = config.get("allowlist_ips", [])
+
+
+            self._cfg_lock = threading.Lock()
 
             self.payload_dir = os.path.join(self.path_resolution['comm_path'], "matrix", "payload")
 
@@ -201,6 +209,7 @@ class Agent(BootAgent):
 
             self.log("[CERT-LOADER] In-memory TLS certs loaded successfully.")
             self.configure_routes()
+
             # True service liveness
             self._emit_beacon = self.check_for_thread_poke("worker", timeout=60, emit_to_file_interval=10)
 
@@ -234,15 +243,6 @@ class Agent(BootAgent):
         """
         self.log(f"{self.NAME} v{self.AGENT_VERSION} – perimeter guard up.")
 
-    def process_command(self, data):
-        """
-        Processes a delegated command.
-
-        This is a placeholder method that would be implemented to handle
-        specific commands relayed from the `/matrix` endpoint.
-        """
-        self.log(f"[CMD] Received delegated command: {data}")
-
     def worker_pre(self):
         """
         A hook that runs once before the main worker loop.
@@ -252,13 +252,24 @@ class Agent(BootAgent):
         """
         self.log("[MATRIX_HTTPS] Boot initialized. Port online, certs verified.")
 
-    def worker(self, config=None, identity=None):
+    def worker(self, config=None, identity:IdentityObject=None):
         """
         Main loop hook for Matrix HTTPS agent.
         This keeps emitting a heartbeat and respects die.cookie / rug_pull.
         """
         if not self.running:
             return
+
+        # Detect config changes dynamically
+        if isinstance(config, dict) and bool(config.get("push_live_config", 0)):
+            self.log(f"[ORACLE] 🔁 Live config update detected: {config}")
+            self._apply_live_config(config)
+
+        if self.lockdown_state and self.lockdown_time > 0:
+            now = int(time.time())
+            if now >= self.lockdown_expires:
+                self.log("[LOCKDOWN] Time expired. Reopening perimeter.")
+                self.toggle_perimeter(False, 0)  # Reopen and reset
 
         # emit a liveness beacon so Matrix sees this agent alive
         self._emit_beacon()
@@ -276,6 +287,19 @@ class Agent(BootAgent):
 
         interruptible_sleep(self, 15)
 
+    def _apply_live_config(self, cfg: dict):
+        """
+        Dynamically applies updated configuration pushed from Phoenix.
+        Supports process_packets.
+        """
+        try:
+
+            pass
+
+        except Exception as e:
+            self.log("[ORACLE][ERROR] Failed to apply live config", error=e)
+
+
     def service_monitor(self):
         """
         Continuously self-pings the Flask `/ping` route to prove HTTPS stack health.
@@ -284,19 +308,21 @@ class Agent(BootAgent):
         It uses a Flask test client to make a GET request to a local endpoint,
         and if the response is successful, it emits a liveness beacon.
         """
-        emit_beacon = self.check_for_thread_poke("service_monitor", timeout=60, emit_to_file_interval=10)
+        emit_beacon = self.check_for_thread_poke("service_monitor", timeout=180, emit_to_file_interval=10)
         while self.running:
             try:
+
                 with self.app.test_client() as client:
                     resp = client.get("/ping")
                     if resp.status_code == 200:
                         emit_beacon()
                     else:
                         self.log(f"[MATRIX-HTTPS][ERROR] Ping route unhealthy: {resp.status_code}")
+
             except Exception as e:
                 self.log("[MATRIX-HTTPS][ERROR] Internal ping failed", error=e)
 
-            interruptible_sleep(self, 20)
+            interruptible_sleep(self, 60)
 
     def worker_post(self):
         """
@@ -348,6 +374,11 @@ class Agent(BootAgent):
                         self.log(f"[MATRIX-HTTPS][SECURITY] IP {ip} explicitly allowed by allowlist")
                 else:
                     self.log("[MATRIX-HTTPS][SECURITY] No IP allowlist restriction in place")
+
+                #are we open for business? if not, log and shut it down
+                if self.lockdown_state:
+                    self.log(f"[MATRIX-HTTPS][BLOCKED] Packet Processing is Off. Access attempt from {ip}.")
+                    return jsonify({"status": "error", "message": "Access denied"}), 403
 
                 # 1) TLS client-cert SPKI pin (bind transport to expected peer)
                 cert_bin = request.environ.get("peercert", None)
@@ -476,7 +507,6 @@ class Agent(BootAgent):
                            """
         return Response(msg, status=418, mimetype="text/html")  # 418 I'm a Teapot
 
-
     def shutdown_cleanup(self):
         """
         Performs cleanup of temporary files during shutdown.
@@ -492,6 +522,74 @@ class Agent(BootAgent):
                     self.log(f"[CLEANUP] Deleted temp cert file: {f.name}")
             except Exception as e:
                 self.log("[CLEANUP][ERROR] Failed to delete temp cert", error=e, block="shutdown")
+
+    def cmd_status(self, content, packet, identity: IdentityObject = None):
+        try:
+            session_id = content.get("session_id")
+            token = content.get("token")
+            return_handler = content.get("return_handler")
+            payload = {
+                "lockdown_state": "Lockdown" if self.lockdown_state else "Open",
+                "lockdown_time": self.lockdown_time,
+                "lockdown_expires": str(bool(self.lockdown_expires)),
+            }
+
+            self.crypto_reply(
+                response_handler=return_handler,
+                payload=payload,
+                session_id=session_id,
+                token=token,
+                rpc_role=self.tree_node.get("config", {}).get("rpc_router_role", "hive.rpc"),
+            )
+
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+    def cmd_toggle_perimeter(self, content, packet, identity: IdentityObject = None):
+        """
+        Swarm command to raise or lower this agent's perimeter.
+        Expects content keys:
+            lockdown_state (bool)            -> True=open, False=lockdown
+            lockdown_time (int)     -> seconds before auto reopen (optional)
+            token (str)             -> optional 2FA token for override
+        """
+        try:
+
+            lockdown_state = bool(content.get("lockdown_state", True))  #up accepting packets, down rejecting packets
+            lockdown_time = int(content.get("lockdown_time", 0)) #how long to lockdown in secs or 0 stay down
+            session_id = content.get("session_id")
+            token = content.get("token")
+            return_handler = content.get("return_handler")
+
+            self.toggle_perimeter(lockdown_state, lockdown_time)
+
+            payload = {
+                "lockdown_state": "Lockdown" if self.lockdown_state else "Open",
+                "lockdown_time": self.lockdown_time,
+                "lockdown_expires": str(bool(self.lockdown_expires)),
+            }
+
+            self.crypto_reply(
+                response_handler=return_handler,
+                payload=payload,
+                session_id=session_id,
+                token=token,
+                rpc_role=self.tree_node.get("config", {}).get("rpc_router_role", "hive.rpc"),
+            )
+
+            self.log(f"[LOCKDOWN] Perimeter toggled → {payload}")
+
+        except Exception as e:
+            self.log(f"[LOCKDOWN][ERROR] cmd_toggle_perimeter failed: {e}")
+
+    def toggle_perimeter(self, lockdown_state, lockdown_time):
+
+        self.lockdown_time = lockdown_time
+        if not lockdown_state:
+            self.lockdown_state = False
+        else:
+            self.lockdown_state = True
+            self.lockdown_expires = int(time.time()) + lockdown_time if lockdown_time > 0 else 0
 
     def run_server(self):
         """
@@ -509,6 +607,7 @@ class Agent(BootAgent):
 
         while (retries < max_retries) or self.run_server_retries:
             try:
+
                 self.log("[HTTPS] Starting run_server()...")
 
                 context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -531,18 +630,10 @@ class Agent(BootAgent):
 
                 self.log(f"[HTTPS] Listening on port {self.port}")
 
-                # Start process liveness thread
-                def process_monitor():
-                    emit_beacon = self.check_for_thread_poke("process_monitor", timeout=60, emit_to_file_interval=10)
-                    while self.running:
-                        emit_beacon()
-                        interruptible_sleep(self, 20)
-
                 # Run the HTTPS server loop in its own thread
                 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
-                # Watchdog threads
-                threading.Thread(target=process_monitor, daemon=True).start()
+                # Watchdog thread
                 threading.Thread(target=self.service_monitor, daemon=True).start()
 
                 break  # success

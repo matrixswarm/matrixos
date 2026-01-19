@@ -131,12 +131,20 @@ class Agent(BootAgent):
         prepares the agent for network communication.
         """
         super().__init__()
-        self.AGENT_VERSION = "2.0.1"
+        self.AGENT_VERSION = "2.1.0"
 
         try:
 
             config = self.tree_node.get("config", {})
             self.allowlist_ips = config.get("allowlist_ips", [])
+
+            # allow incoming packets (True=Deny, False=Allow)
+            self.lockdown_state = config.get('lockdown_state', False)  # whether the agent currently accepts external connections (False=accepting packets, True=not accepting packets)
+            self.lockdown_time = config.get('lockdown_time', 0)  # seconds to stay offline before auto-reopen (0 = none)
+            self.lockdown_expires = 0  # epoch timestamp when lockdown ends
+
+            self._cfg_lock = threading.Lock()
+
             self.port = config.get("port", 8765)
             self._websocket_clients = set()
             self._sessions = {}
@@ -259,6 +267,12 @@ class Agent(BootAgent):
             if config is None:
                 config = self.tree_node.get("config", {})  # Default fallback
 
+            if self.lockdown_state and self.lockdown_time > 0:
+                now = int(time.time())
+                if now >= self.lockdown_expires:
+                    self.log("[LOCKDOWN] Time expired. Reopening perimeter.")
+                    self.toggle_perimeter(False, 0)  # Reopen and reset
+
             with self._lock:
                 if self._thread and self._thread.is_alive():
                     if config == self._config:
@@ -285,11 +299,76 @@ class Agent(BootAgent):
 
         interruptible_sleep(self, self.interval)
 
+    def cmd_status(self, content, packet, identity: IdentityObject = None):
+        try:
+            session_id = content.get("session_id")
+            token = content.get("token")
+            return_handler = content.get("return_handler")
+            payload = {
+                "lockdown_state": "Lockdown" if self.lockdown_state else "Open",
+                "lockdown_time": self.lockdown_time,
+                "lockdown_expires": str(bool(self.lockdown_expires)),
+            }
+
+            self.crypto_reply(
+                response_handler=return_handler,
+                payload=payload,
+                session_id=session_id,
+                token=token,
+                rpc_role=self.tree_node.get("config", {}).get("rpc_router_role", "hive.rpc"),
+            )
+
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+    def cmd_toggle_perimeter(self, content, packet, identity: IdentityObject = None):
+        """
+        Swarm command to raise or lower this agent's perimeter.
+        Expects content keys:
+            lockdown_state (bool)            -> True=open, False=lockdown
+            lockdown_time (int)     -> seconds before auto reopen (optional)
+            token (str)             -> optional 2FA token for override
+        """
+        try:
+
+            lockdown_state = bool(content.get("lockdown_state", True))  # up accepting packets, down rejecting packets
+            lockdown_time = int(content.get("lockdown_time", 0))  # how long to lockdown in secs or 0 stay down
+            session_id = content.get("session_id")
+            token = content.get("token")
+            return_handler = content.get("return_handler")
+
+            self.toggle_perimeter(lockdown_state, lockdown_time)
+
+            payload = {
+                "lockdown_state": "Lockdown" if self.lockdown_state else "Open",
+                "lockdown_time": self.lockdown_time,
+                "lockdown_expires": str(bool(self.lockdown_expires)),
+            }
+
+            self.crypto_reply(
+                response_handler=return_handler,
+                payload=payload,
+                session_id=session_id,
+                token=token,
+                rpc_role=self.tree_node.get("config", {}).get("rpc_router_role", "hive.rpc"),
+            )
+
+            self.log(f"[LOCKDOWN] Perimeter toggled → {payload}")
+
+        except Exception as e:
+            self.log(f"[LOCKDOWN][ERROR] cmd_toggle_perimeter failed: {e}")
+
+    def toggle_perimeter(self, lockdown_state, lockdown_time):
+        self.lockdown_time = lockdown_time
+        if not lockdown_state:
+            self.lockdown_state = False
+        else:
+            self.lockdown_state = True
+            self.lockdown_expires = int(time.time()) + lockdown_time if lockdown_time > 0 else 0
 
     def start_socket_loop(self):
         """
         Initializes and runs the asyncio event loop for the WebSocket server.
-
         This method is designed to run in a separate thread. It sets up the
         SSL context with mTLS requirements, binds the server to a host and port,
         and starts the event loop. It also schedules a service heartbeat beacon
@@ -409,7 +488,25 @@ class Agent(BootAgent):
                 ip = ip[0]
             else:
                 ip = "unknown"
+
             self.log(f"[WS][CONNECT] Client connected from IP: {ip}")
+
+            # Explicitly confirm the client is in allowlist (or no allowlist restriction)
+            if self.allowlist_ips:
+                if ip not in self.allowlist_ips:
+                    self.log(f"[WS][SECURITY] IP {ip} explicitly blocked by allowlist")
+                    await websocket.close(reason="Blocked by IP allowlist")
+                    return
+                else:
+                    self.log(f"[WS][SECURITY] IP {ip} explicitly allowed by allowlist")
+            else:
+                self.log("[WS][SECURITY] No IP allowlist restriction in place")
+
+            # are we open for business? if not, log and shut it down
+            if self.lockdown_state:
+                self.log(f"[MATRIX-WEBSOCKET][BLOCKED] Packet Processing is Off. Access attempt from {ip}.")
+                await websocket.close(reason="Packet Processing is Off")
+                return
 
             sslobj = websocket.transport.get_extra_info("ssl_object")
             cert_bin = sslobj.getpeercert(binary_form=True) if sslobj else None
@@ -426,17 +523,6 @@ class Agent(BootAgent):
                 return
             else:
                 self.log(f"[WS][SPKI Verified] (peer={actual_pin}, expected={self._expected_peer_spki})")
-
-            # Explicitly confirm the client is in allowlist (or no allowlist restriction)
-            if self.allowlist_ips:
-                if ip not in self.allowlist_ips:
-                    self.log(f"[WS][SECURITY] IP {ip} explicitly blocked by allowlist")
-                    await websocket.close(reason="Blocked by IP allowlist")
-                    return
-                else:
-                    self.log(f"[WS][SECURITY] IP {ip} explicitly allowed by allowlist")
-            else:
-                self.log("[WS][SECURITY] No IP allowlist restriction in place")
 
             # Phase 1: Handshake
             sid = await self._handle_handshake(websocket)
@@ -677,6 +763,10 @@ class Agent(BootAgent):
             else:
                 sender=packet.get("origin", "not specified")
 
+            # are we open for business? if not, log and shut it down
+            if self.lockdown_state:
+                self.log(f"[MATRIX-WEBSOCKET][BLOCKED] Packet Processing is Off. Access attempt from {sender}.")
+                return
 
             if session_id and session_id in self._sessions:
                 websocket = self._sessions[session_id]["ws"]
@@ -746,9 +836,14 @@ class Agent(BootAgent):
         """
         try:
 
-            sender="unknown"
-            if self.encryption_enabled and identity and identity.has_verified_identity():
-                sender=identity.get_sender_uid()
+            sender="not specified"
+            if identity and identity.has_verified_identity():
+                sender = identity.get_sender_uid()
+
+            #are we open for business? if not, log and shut it down
+            if self.lockdown_state:
+                self.log(f"[MATRIX-WEBSOCKET][BLOCKED] Packet Processing is Off. Access attempt from {sender}.")
+                return
 
             if not isinstance(content, dict):
                 self.log("[WS][REFLEX][SKIP] Content is not a dict.")

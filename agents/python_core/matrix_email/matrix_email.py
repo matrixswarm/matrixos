@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 
+import time
 import threading
 import json
 import imaplib
@@ -37,8 +38,13 @@ class Agent(BootAgent):
         try:
             self.AGENT_VERSION = "1.0.0"
 
-            cfg = self.tree_node.get("config", {})
-            mail = cfg.get("imap", {}) or cfg.get("mail", {})
+            config = self.tree_node.get("config", {})
+            mail = config.get("imap", {}) or config.get("mail", {})
+
+            # allow incoming packets (True=Deny, False=Allow)
+            self.lockdown_state = config.get('lockdown_state', False)  # whether the agent currently accepts external connections (False=accepting packets, True=not accepting packets)
+            self.lockdown_time = config.get('lockdown_time', 0)  # seconds to stay offline before auto-reopen (0 = none)
+            self.lockdown_expires = 0  # epoch timestamp when lockdown ends
 
             # IMAP CONFIG
             self.imap_host = mail.get("host") or mail.get("incoming_server")
@@ -48,19 +54,16 @@ class Agent(BootAgent):
             self.imap_folder = mail.get("folder", "INBOX")
 
             # Polling frequency
-            self.poll_interval = int(cfg.get("poll_interval", 20))
+            self.poll_interval = int(config.get("poll_interval", 20))
 
             # SECURITY KEYS
-            signing = cfg.get("security", {}).get("signing", {})
+            signing = config.get("security", {}).get("signing", {})
             # Phoenix → Swarm signing key
             self.remote_pubkey = signing.get("remote_pubkey")
             # Our private key for AES unwrap
             self.local_privkey = signing.get("privkey")
 
-            self._msg_retrieval_limit=10
-
-            #are we accepting packets on Matrix Behalf
-            self._process_packets=True
+            self._msg_retrieval_limit=int(config.get("msg_retrieval_limit", 10))
 
             self._cfg_lock = threading.Lock()
 
@@ -119,11 +122,7 @@ class Agent(BootAgent):
 
             # Check mailbox state and processing flag
             if len(msgs) > 0:
-                if not self._process_packets:
-                    self.log(
-                        f"[MATRIX_EMAIL] ⚠️ {len(msgs)} unread messages detected — processing is DISABLED (process_packets=0).")
-                else:
-                    self.log(f"[MATRIX_EMAIL] 📬 {len(msgs)} unread messages detected — beginning processing.")
+                self.log(f"[MATRIX_EMAIL] 📬 {len(msgs)} unread messages detected — beginning processing.")
             else:
                 self.log("[MATRIX_EMAIL] 📭 No unread messages found.")
 
@@ -199,7 +198,7 @@ class Agent(BootAgent):
         try:
 
             if not guard_packet_size(outer_packet, log=self.log):
-                self.log("bad or oversized payload")
+                self.log("bad or oversize payload")
                 return False
 
             unwrapped = unwrap_secure_packet(
@@ -237,24 +236,20 @@ class Agent(BootAgent):
     # ------------------------------------------------------------
     # Command Handlers
     # ------------------------------------------------------------
-    def cmd_list_status(self, content, packet, identity: IdentityObject = None):
-        """
-        Returns current operational status for cockpit / Phoenix.
-        """
+    def cmd_status(self, content, packet, identity: IdentityObject = None):
         try:
-
             session_id = content.get("session_id")
             token = content.get("token")
             return_handler = content.get("return_handler")
-
             payload = {
-                "process_packets": self._process_packets,
+                "lockdown_state": "Lockdown" if self.lockdown_state else "Open",
+                "lockdown_time": self.lockdown_time,
+                "lockdown_expires": str(bool(self.lockdown_expires)),
                 "imap_host": self.imap_host,
                 "imap_user": self.imap_user,
                 "folder": self.imap_folder,
                 "poll_interval": self.poll_interval,
                 "retrieval_limit": self._msg_retrieval_limit,
-                "agent_version": self.AGENT_VERSION,
             }
 
             self.crypto_reply(
@@ -265,16 +260,60 @@ class Agent(BootAgent):
                 rpc_role=self.tree_node.get("config", {}).get("rpc_router_role", "hive.rpc"),
             )
 
-            self.log(f"[MATRIX_EMAIL][STATUS] Sent status packet: {payload}")
+        except Exception as e:
+            self.log(error=e, block="main_try", level="ERROR")
+
+    def cmd_toggle_perimeter(self, content, packet, identity: IdentityObject = None):
+        """
+        Swarm command to raise or lower this agent's perimeter.
+        Expects content keys:
+            lockdown_state (bool)            -> True=open, False=lockdown
+            lockdown_time (int)     -> seconds before auto reopen (optional)
+            token (str)             -> optional 2FA token for override
+        """
+        try:
+
+            lockdown_state = bool(content.get("lockdown_state", True))  #up accepting packets, down rejecting packets
+            lockdown_time = int(content.get("lockdown_time", 0)) #how long to lockdown in secs or 0 stay down
+            session_id = content.get("session_id")
+            token = content.get("token")
+            return_handler = content.get("return_handler")
+
+            self.toggle_perimeter(lockdown_state, lockdown_time)
+
+            payload = {
+                "lockdown_state": "Lockdown" if self.lockdown_state else "Open",
+                "lockdown_time": self.lockdown_time,
+                "lockdown_expires": str(bool(self.lockdown_expires)),
+            }
+
+            self.crypto_reply(
+                response_handler=return_handler,
+                payload=payload,
+                session_id=session_id,
+                token=token,
+                rpc_role=self.tree_node.get("config", {}).get("rpc_router_role", "hive.rpc"),
+            )
+
+            self.log(f"[LOCKDOWN] Perimeter toggled → {payload}")
 
         except Exception as e:
-            self.log("[MATRIX_EMAIL][STATUS][ERROR]", error=e)
+            self.log(f"[LOCKDOWN][ERROR] cmd_toggle_perimeter failed: {e}")
+
+    def toggle_perimeter(self, lockdown_state, lockdown_time):
+        self.lockdown_time = lockdown_time
+        if not lockdown_state:
+            self.lockdown_state = False
+        else:
+            self.lockdown_state = True
+            self.lockdown_expires = int(time.time()) + lockdown_time if lockdown_time > 0 else 0
 
     # ------------------------------------------------------------
     # Worker loop
     # ------------------------------------------------------------
     def worker(self, config=None, identity: IdentityObject=None):
         try:
+
             self._emit_beacon()
 
             # Detect config changes dynamically
@@ -282,27 +321,33 @@ class Agent(BootAgent):
                 self.log(f"[ORACLE] 🔁 Live config update detected: {config}")
                 self._apply_live_config(config)
 
-            msgs = self._get_unread_messages()
+            if self.lockdown_state and self.lockdown_time > 0:
+                now = int(time.time())
+                if now >= self.lockdown_expires:
+                    self.log("[LOCKDOWN] Time expired. Reopening perimeter.")
+                    self.toggle_perimeter(False, 0)  # Reopen and reset
 
-            with self._cfg_lock:
-                process_packets = self._process_packets
+            if not self.lockdown_state:
 
-            if not msgs or not process_packets:
-                interruptible_sleep(self, self.poll_interval)
-                return
+                msgs = self._get_unread_messages()
 
-            for raw in msgs:
-                outer = self._extract_payload_from_email(raw)
-                if not outer:
-                    continue
+                if not msgs:
+                    return
 
-                self._unwrap_and_forward(outer)
+                for raw in msgs:
+                    outer = self._extract_payload_from_email(raw)
+                    if not outer:
+                        continue
+
+                    self._unwrap_and_forward(outer)
+            else:
+              self.log(f"[MATRIX-EMAIL][BLOCKED] Packet Processing is Off.")
 
         except Exception as e:
-
             self.log("[MATRIX_EMAIL][WORKER][ERROR]", error=e)
 
-        interruptible_sleep(self, self.poll_interval)
+        finally:
+            interruptible_sleep(self, self.poll_interval)
 
     def _apply_live_config(self, cfg: dict):
         """
@@ -311,13 +356,7 @@ class Agent(BootAgent):
         """
         try:
 
-            process_packets = bool(cfg.get("process_packets", 0))
-
-            # --- process packets ---
-            if process_packets != self._process_packets:
-                with self._cfg_lock:
-                    self._process_packets=process_packets
-                    self.log(f"process_packets is now {bool(process_packets)}", block="process_packets", level="INFO")
+            pass
 
         except Exception as e:
             self.log("[ORACLE][ERROR] Failed to apply live config", error=e)

@@ -1,15 +1,14 @@
 # Authored by Daniel F MacDonald and ChatGPT aka The Generals
-import ssl
 import sys
 import os
-import smtplib
-from email.message import EmailMessage
 
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 
+from agents.python_core.email_send.factory.email_queue_manager import EmailQueueManager
 from core.python_core.boot_agent import BootAgent
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
+from core.python_core.class_lib.processes.thread_launcher import ThreadLauncher
 
 class Agent(BootAgent):
     """
@@ -38,17 +37,19 @@ class Agent(BootAgent):
 
         try:
             cfg = self.tree_node.get("config", {})
-            config = cfg.get("smtp", {}) or cfg.get("mail", {})
+            smtp = cfg.get("smtp", {}) or cfg.get("mail", {})
 
-            self.smtp_server = config.get("smtp_server")  # matches your directive
-            self.smtp_port = config.get("smtp_port")
-            self.from_address = config.get("smtp_username")  # sender's email
-            self.password = config.get("smtp_password")
-            self.to_address = config.get("smtp_to")  # default recipient
-            self.encryption = (config.get("smtp_encryption") or "SSL").upper().strip()
+            self.smtp_server = smtp.get("smtp_server")  # matches your directive
+            self.smtp_port = smtp.get("smtp_port")
+            self.from_address = smtp.get("smtp_username")  # sender's email
+            self.password = smtp.get("smtp_password")
+            self.to_address = smtp.get("smtp_to")  # default recipient
+            self.encryption = (smtp.get("smtp_encryption") or "SSL").upper().strip()
+            self.thread_launcher = ThreadLauncher(self)
+            self.queue = EmailQueueManager(log=self.log, thread_launcher=self.thread_launcher)
+
         except Exception as e:
             self.log(error=e, level="ERROR")
-
 
     def cmd_send_email(self, content: dict, packet: dict, identity: IdentityObject = None):
         """Entry point when swarm sends a 'send email' command."""
@@ -71,16 +72,17 @@ class Agent(BootAgent):
                 self.log("[EMAIL] ❌ Missing required fields.", level="ERROR")
                 return
 
-            self._send_mail(
-                smtp_server=smtp_server,
-                smtp_port=smtp_port,
-                encryption=encryption,
-                from_addr=from_addr,
-                to_addr=to_addr,
-                password=password,
-                subject=subject,
-                body=body,
-            )
+            self.queue.enqueue({
+                "smtp_server": smtp_server,
+                "smtp_port": smtp_port,
+                "encryption": encryption,
+                "from_addr": from_addr,
+                "to_addr": to_addr,
+                "password": password,
+                "subject": subject,
+                "body": body
+            })
+
         except Exception as e:
             self.log("[EMAIL] ❌ Failed to dispatch email", error=e)
 
@@ -108,108 +110,20 @@ class Agent(BootAgent):
             # Prioritize the pre-formatted message, but fall back to the raw message
             body = content.get("formatted_msg") or content.get("msg") or "No message content provided."
 
-            self._send_mail(
-                smtp_server=self.smtp_server,
-                smtp_port=self.smtp_port or 465,
-                encryption="SSL",
-                from_addr=self.from_address,
-                to_addr=self.to_address,
-                password=self.password,
-                subject=subject,
-                body=body,
-            )
+            self.queue.enqueue({
+                "agent": self,
+                "smtp_server": self.smtp_server,
+                "smtp_port": self.smtp_port,
+                "encryption": self.encryption,
+                "from_addr": self.from_address,
+                "to_addr": self.to_address,
+                "password": self.password,
+                "subject": subject,
+                "body": body,
+            })
 
         except Exception as e:
             self.log("Failed to process alert for email sending.", error=e, block="main_try")
-
-    def _send_mail(
-            self,
-            smtp_server: str,
-            smtp_port: int,
-            encryption: str,
-            from_addr: str,
-            to_addr: str,
-            password: str,
-            subject: str,
-            body: str,
-    ):
-        """Handles all SMTP/STARTTLS/PLAIN send operations."""
-        try:
-            msg = EmailMessage()
-            msg["From"] = from_addr
-            msg["To"] = to_addr
-            msg["Subject"] = subject
-            msg.set_content(body)
-
-            context = ssl.create_default_context()
-
-            if encryption == "SSL":
-                self.log(f"[EMAIL][CONNECT] Using SSL on {smtp_server}:{smtp_port}")
-
-                #  STEP 1—Test DNS resolution
-                try:
-                    self.log(f"[EMAIL][DNS] Resolving hostname: {smtp_server}")
-                    resolved = ssl.get_server_certificate((smtp_server, smtp_port))
-                    self.log(f"[EMAIL][DNS] Host resolved OK.")
-                except Exception as e:
-                    self.log("[EMAIL][DNS][ERROR] Hostname resolution failed", error=e)
-                    raise
-
-                #  STEP 2—Socket reachability test BEFORE smtplib wraps it
-                import socket
-                try:
-                    self.log(f"[EMAIL][SOCKET] Testing TCP connect to {smtp_server}:{smtp_port}")
-                    sock = socket.create_connection((smtp_server, smtp_port), timeout=10)
-                    sock.close()
-                    self.log("[EMAIL][SOCKET] TCP connection succeeded.")
-                except Exception as e:
-                    self.log("[EMAIL][SOCKET][ERROR] TCP connection failed", error=e)
-                    raise
-
-                #  STEP 3—Try SSL wrapper handshake alone
-                try:
-                    self.log("[EMAIL][SSL] Starting SSL handshake test...")
-                    with smtplib.SMTP_SSL(smtp_server, smtp_port, context=context, timeout=10) as test:
-                        self.log("[EMAIL][SSL] Handshake OK (pre-login).")
-                except Exception as e:
-                    self.log("[EMAIL][SSL][HANDSHAKE_ERROR] SSL handshake failed", error=e)
-                    raise
-
-                #  STEP 4—If handshake works, try login explicitly
-                try:
-                    self.log(f"[EMAIL][LOGIN] Attempting login as {from_addr}")
-                    with smtplib.SMTP_SSL(smtp_server, smtp_port, context=context, timeout=10) as server:
-                        server.login(from_addr, password)
-                        self.log("[EMAIL][LOGIN] Login OK. Sending message...")
-                        server.send_message(msg)
-                        self.log("[EMAIL][SEND] Email successfully sent via SSL.")
-                except smtplib.SMTPAuthenticationError as auth_err:
-                    self.log("[EMAIL][AUTH_ERROR] SMTP authentication failed", error=auth_err)
-                    raise
-                except Exception as e:
-                    self.log("[EMAIL][ERROR] Unknown send failure", error=e)
-                    raise
-
-
-            elif encryption == "STARTTLS":
-                self.log(f"[EMAIL][CONNECT] Using STARTTLS on {smtp_server}:{smtp_port}")
-                with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
-                    server.ehlo()
-                    server.starttls(context=context)
-                    server.ehlo()
-                    server.login(from_addr, password)
-                    server.send_message(msg)
-                    self.log("[EMAIL][SEND] ✅ Sent via STARTTLS.")
-
-            else:
-                self.log(f"[EMAIL][CONNECT] Using plain SMTP on {smtp_server}:{smtp_port}")
-                with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
-                    server.login(from_addr, password)
-                    server.send_message(msg)
-                    self.log("[EMAIL][SEND] ✅ Sent without encryption.")
-        except Exception as e:
-            self.log("[EMAIL][ERROR] Send failure", error=e)
-
 
 if __name__ == "__main__":
     agent = Agent()
