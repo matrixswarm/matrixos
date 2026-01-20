@@ -5,7 +5,7 @@ import sys, os
 sys.path.insert(0, os.getenv("SITE_ROOT"))
 sys.path.insert(0, os.getenv("AGENT_PATH"))
 
-import time, requests
+import time, requests, html, re
 from core.python_core.boot_agent import BootAgent
 from core.python_core.utils.swarm_sleep import interruptible_sleep
 from core.python_core.class_lib.packet_delivery.utility.encryption.utility.identity import IdentityObject
@@ -34,6 +34,7 @@ class Agent(BootAgent):
         # maintain last state
         self._last_state = {}       # url → { "success": bool, "ts": float }
         self._last_alert = {}       # url → timestamp of last alert
+        self._recovery_hits = {}    # url → int
 
         # log state timeouts
         self.log_every = int(cfg.get("log_every", 300))  # seconds between routine summary logs
@@ -67,14 +68,12 @@ class Agent(BootAgent):
         for entry in self.targets:
             url = entry.get("url")
             note = entry.get("note", "")
-            expect = entry.get("expect", "")
+            entry.get("expect", "")
 
             if not url:
                 continue
 
             start = time.time()
-            ok = False
-            status = None
 
             try:
                 r = requests.get(url, timeout=6)
@@ -104,13 +103,35 @@ class Agent(BootAgent):
 
 
     # -------------------------------------------------------
+    def normalize_text(self, text: str) -> str:
+        if not text:
+            return ""
+
+        # Decode HTML entities (&quot; &amp; etc)
+        text = html.unescape(text)
+
+        # Strip HTML comments
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+
+        # Collapse whitespace
+        text = re.sub(r"\s+", " ", text)
+
+        # Normalize quotes
+        text = text.replace("“", '"').replace("”", '"')
+        text = text.replace("‘", "'").replace("’", "'")
+
+        return text.strip()
+
     def _evaluate(self, url, ok, status, elapsed, note, expect, body, now):
         prev = self._last_state.get(url)
         last_alert = self._last_alert.get(url, 0)
 
         # If an expected text is declared, verify it is present
         if expect:
-            text_ok = expect in body
+            clean_body = self.normalize_text(body)
+            clean_expect = self.normalize_text(expect)
+
+            text_ok = clean_expect in clean_body
             if ok and not text_ok:
                 ok = False
                 status = f"MISMATCH (missing '{expect}')"
@@ -119,6 +140,7 @@ class Agent(BootAgent):
         if prev is None:
             self._last_state[url] = {"success": ok, "ts": now}
             if not ok:
+                self._recovery_hits[url] = 0
                 self._send_alert(url, status, elapsed, note, expect, "DOWN", now)
             return
 
@@ -130,15 +152,18 @@ class Agent(BootAgent):
                 if self.only_log_state_changes:
                     self.log(f"[UPTIME][STATE] {url} changed → {'UP' if ok else 'DOWN'} ({status})")
                 self._send_alert(url, status, elapsed, note, expect, "DOWN", now)
-            self._last_state[url] = {"success": False, "ts": now}
+                self._last_state[url] = {"success": False, "ts": now}
             return
 
         # previously fail → now success
         if not prev["success"] and ok:
-            if self.only_log_state_changes:
-                self.log(f"[UPTIME][STATE] {url} changed → {'UP' if ok else 'DOWN'} ({status})")
+            hits = self._recovery_hits.get(url, 0) + 1
+            self._recovery_hits[url] = hits
+            if hits < 3:
+                return
             self._send_alert(url, status, elapsed, note, expect, "RECOVERY", now)
             self._last_state[url] = {"success": True, "ts": now}
+            self._recovery_hits[url] = 0
             return
 
         # still down, but cooldown expired → repeat alert
@@ -207,7 +232,11 @@ class Agent(BootAgent):
                 pk1.set_payload_item("handler", ep.get_handler())
                 self.pass_packet(pk1, ep.get_universal_id())
 
-            self.log(f"[UPTIME][ALERT] {event_type}: {url}")
+            level="WARN"
+            if expect and event_type == "DOWN":
+                level="ERROR"
+
+            self.log(f"[UPTIME][ALERT] {event_type}: {url}", level=level)
 
         except Exception as e:
             self.log("[UPTIME][ALERT][ERROR]", error=e)

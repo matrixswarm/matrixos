@@ -1,3 +1,43 @@
+<!-- ================= MATRIXSWARM HEADER BLOCK ================= -->
+
+<div align="center">
+
+#  **MatrixSwarm / MatrixOS**
+
+### *The Self-Healing Swarm Runtime for Autonomous Agents*
+
+**Version:** 1.1 · **Status:** Pre-Release · **License:** MatrixSwarm Community License (Modified MIT)
+
+---
+
+[![Made with Python](https://img.shields.io/badge/Made%20with-Python%203.10+-blue.svg?style=flat-square)](https://www.python.org/)
+[![Security: Encrypted & Signed](https://img.shields.io/badge/Security-Encrypted%20%26%20Signed-green.svg?style=flat-square)](#)
+[![Phoenix Cockpit](https://img.shields.io/badge/Control-Phoenix%20Cockpit-orange.svg?style=flat-square)](https://github.com/matrixswarm/phoenix)
+[![Discord Hive](https://img.shields.io/badge/Join-The%20Hive-7289da?style=flat-square&logo=discord)](https://discord.gg/CyngHqDmku)
+
+---
+
+###  **MatrixSwarm** is not a framework — it’s a living runtime.
+
+Every agent is autonomous, cryptographically verified, and resurrects if killed.  
+Together they form *a self-orchestrating microservice civilization* called a **universe**.
+
+- File-based communication — no raw HTTP APIs.  
+- Fully encrypted directives and symmetric vaults.  
+- Resilient, decentralized, and resurrected on failure.  
+- Designed for real-world distributed AI and automation.  
+- Controlled securely through [**Phoenix Cockpit**](https://github.com/matrixswarm/phoenix).
+
+---
+
+> “We don’t deploy containers. We awaken agents.”
+
+**MatrixSwarm Digital Labs — Victory Always.**
+
+</div>
+
+<!-- ============================================================= -->
+
 # MatrixOS  
 (from the MatrixSwarm ecosystem)
 ---
