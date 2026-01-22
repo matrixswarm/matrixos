@@ -208,14 +208,12 @@ def boot_universe(universe: str, args, base="/matrix", python_exec=sys.executabl
 
     comm_path = cp.ensure_comm_channel(MATRIX_UUID, [{}])
 
-    tp.assign_identity_to_all_nodes(matrix_priv_obj)
-    tp.assign_identity_token_to_node('matrix', matrix_priv_obj=matrix_priv,
-                                     replace_keys={
-                                         'priv_key': matrix_priv,
-                                         'pub_key': matrix_pub,
-                                         'private_key': matrix_key_b64
-                                     })
-
+    tp.assign_identity_to_all_nodes(
+        matrix_priv_obj,
+        matrix_pub=matrix_pub,
+        matrix_priv=matrix_priv,
+        matrix_key_b64=matrix_key_b64
+    )
 
     # encryption is turned on here
     mode = "encrypt"
@@ -248,6 +246,7 @@ def boot_universe(universe: str, args, base="/matrix", python_exec=sys.executabl
     fb.set_aes_encryption_pubkey(matrix_pub)
     agent = DeliveryAgent()
     agent.set_crypto_handler(packet_encryption_factory(mode, fb))
+    #this is where the full tree is delivered to Matrix
     pk = Packet()
     pk.set_data({'agent_tree': tp.root})
     agent.set_location({"path": comm_path}) \

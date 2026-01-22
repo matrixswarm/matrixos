@@ -1,3 +1,5 @@
+# Authored by Daniel F MacDonald and ChatGPT aka The Generals
+# Docstrings by Gemini
 import os
 import time
 import traceback
@@ -1496,16 +1498,20 @@ class BootAgent(PacketFactoryMixin, PacketDeliveryFactoryMixin, PacketReceptionF
             #this block is basically only given to a sentinel, that's the only one that would need this
             #len of keychain["security_box"] is checked because multiple iterations will cause it
             #to be overridden
-            if bool(cfg.get("matrix_secure_verified")) and len(keychain["security_box"])==1:
-                self.log("[TRUST] matrix_secure_verified: TRUE → injecting real Matrix private key.")
+            if bool(cfg.get("matrix_secure_verified",0)):
+
+                uid=node.get('universal_id')
+                self.log(f"[TRUST][{uid.upper()}] - matrix_secure_verified: TRUE → injecting real Matrix private key.")
                 keychain["security_box"]["encryption_enabled"] = int(self.encryption_enabled)
-                keychain["security_box"]["matrix_priv"] = self.matrix_priv
-                keychain["security_box"]["matrix_pub"] = self.matrix_pub
+                #if this agent is assigned matrix_secure_verified then it was assigned matrix's keys during assign_identity_to_all_nodes
+                keychain["security_box"]["matrix_priv"] = keychain["matrix_priv"] = cfg["matrix_secure_store"]["matrix_priv"]
+                keychain["security_box"]["matrix_pub"] = cfg["matrix_secure_store"]["matrix_pub"]
+                keychain["security_box"]["matrix_key"] = cfg["matrix_secure_store"]["matrix_key"]
                 #keychain["security_box"]["priv"] = self.secure_keys['priv'] in tree_node
                 #keychain["security_box"]["pub"] = self.secure_keys['pub']   in tree_node
                 #keychain["security_box"]["private_key"] = self.private_key   in tree_node
                 keychain["security_box"]["swarm_key"] = self.swarm_key
-                keychain["security_box"]["node"] = self.tree_node.copy()
+                keychain["security_box"]["node"] = cfg["matrix_secure_store"]["matrix_node"]
                 keychain["security_box"]["spawner"] = self.command_line_args["spawner"]
 
             return keychain

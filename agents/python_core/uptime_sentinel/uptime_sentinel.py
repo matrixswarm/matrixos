@@ -28,6 +28,8 @@ class Agent(BootAgent):
         # send alerts to a Phoenix role (discord, email, etc.)
         self.alert_role = cfg.get("alert_to_role", "hive.alert")
 
+        self.alert_enabled = bool(cfg.get("alert_enabled", True))
+
         # cool-down per endpoint
         self.cooldown = int(cfg.get("cooldown", 300))
 
@@ -41,7 +43,7 @@ class Agent(BootAgent):
         self.only_log_state_changes = bool(cfg.get("only_log_state_changes", False))
         self._last_log_time = 0
 
-        self.log(f"[UPTIME] Online with {len(self.targets)} targets — interval={self._interval}s cooldown={self.cooldown}s")
+        self.log(f"[UPTIME] Online with {len(self.targets)} targets — interval={self._interval}s cooldown={self.cooldown}s alerts_enabled={self.alert_enabled}")
 
     # -------------------------------------------------------
     def worker(self, config=None, identity:IdentityObject=None):
@@ -182,6 +184,11 @@ class Agent(BootAgent):
         """
         Build a full alert packet and dispatch it to alert_role.
         """
+
+        if not self.alert_enabled:
+            self.log(f"[UPTIME][ALERT-SUPPRESSED] {event_type}: {url}")
+            return
+
         self._last_alert[url] = now
 
         try:

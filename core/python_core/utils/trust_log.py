@@ -20,14 +20,14 @@ def log_trust_banner(agent_name, logger, pub, matrix_pub=None, swarm_key=None, m
     private_kp  = get_fp(private_key)
 
     box = [
-        "╔════════════════════════════════════════════╗",
-        f"║ 🔐 TRUST LINEAGE - {agent_name:<25}       ║",
-        f"║ 🧬 SELF:     {self_fp:<12}                ║",
-        f"║ 🧠 MATRIX:   {matrix_fp:<12}              ║",
-        f"║ 🔑 M-PRIV:   {matrix_pvfp:<12}            ║",
-        f"║ 🧊 SWARM:    {swarm_fp:<12}               ║",
-        f"║ 🗝️ PRIV-KEY: {private_kp:<12}            ║",
-        "╚════════════════════════════════════════════╝"
+         "╔════════════════════════════════════════════╗",
+        f"║ 🔐 TRUST LINEAGE - {agent_name:<25}        ║",
+        f"║ 🧬 SELF PUBKEY:    {self_fp:<12}           ║",
+        f"║ 🧠 MATRIX PUBKEY:  {matrix_fp:<12}         ║",
+        f"║ 🔑 MATRIX PRIVKEY: {matrix_pvfp:<12}       ║",
+        f"║ 🧊 SWARM AES KEY:  {swarm_fp:<12}          ║",
+        f"║ 🗝️ SELF AES KEY:   {private_kp:<12}        ║",
+         "╚════════════════════════════════════════════╝"
     ]
 
 

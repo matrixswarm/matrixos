@@ -686,18 +686,72 @@ class TreeParser(LogMixin):
         recurse(self.root, [])
         return service_nodes
 
-    def assign_identity_to_all_nodes(self, matrix_priv_obj, encryption_enabled=True, force=False):
+    def get_node_shallow(self, universal_id: str):
         """
-        Iterates through all nodes and assigns a signed identity token.
-
-        This method orchestrates the creation of the swarm's chain of trust.
-        It calls `assign_identity_token_to_node` for every agent in the tree,
-        which is the foundation of secure communication within the swarm.
+        Returns a deep copy of the specified node with children stripped.
+        Useful when sharing metadata without replicating the full subtree.
         """
+        node = self.get_node(universal_id)
+        if not node:
+            return None
+        clone = copy.deepcopy(node)
+        if "children" in clone:
+            clone["children"] = []
+        return clone
 
+    def assign_identity_to_all_nodes(self, matrix_priv_obj, matrix_pub=None, matrix_priv=None, matrix_key_b64=None,
+                                     encryption_enabled=True, force=False):
+        """
+        Consolidated identity assignment routine.
+
+        - If node is "matrix", assign it the Matrix keys directly.
+        - If node is a sentinel with `matrix_secure_verified`, assign Matrix credentials.
+        - Otherwise, generate fresh keys for that node.
+
+        Args:
+            matrix_priv_obj: RSA private key object for signing.
+            matrix_pub: PEM-encoded Matrix public key string.
+            matrix_priv: PEM-encoded Matrix private key string.
+            matrix_key_b64: Base64-encoded AES key string.
+        """
         for node in self.walk_tree(self.root):
             uid = node.get("universal_id")
-            if uid:
+            if not uid:
+                continue
+
+            # === CASE 1: Matrix Node ===
+            if uid == "matrix":
+                self.assign_identity_token_to_node(
+                    uid,
+                    matrix_priv_obj=matrix_priv_obj,
+                    replace_keys={
+                        "priv_key": matrix_priv,
+                        "pub_key": matrix_pub,
+                        "private_key": matrix_key_b64
+                    },
+                    encryption_enabled=encryption_enabled,
+                    force=True
+                )
+                print(f"[ASSIGN-ALL] Matrix node assigned root keypair.")
+
+            # === CASE 2: Verified Sentinel ===
+            elif node.get("config", {}).get("matrix_secure_verified"):
+                self.assign_identity_token_to_node(
+                    uid,
+                    matrix_priv_obj=matrix_priv_obj,
+                    encryption_enabled=encryption_enabled,
+                    force=True
+                )
+                node.setdefault("config", {}).setdefault("matrix_secure_store", {})
+                node["config"]["matrix_secure_store"]["matrix_priv"] = matrix_priv
+                node["config"]["matrix_secure_store"]["matrix_pub"] = matrix_pub
+                node["config"]["matrix_secure_store"]["matrix_key"] = matrix_key_b64
+                node["config"]["matrix_secure_store"]["matrix_node"] = self.get_node_shallow('matrix')
+                node["config"]["matrix_secure_store"]["verified_timestamp"] = int(time.time())
+                print(f"[ASSIGN-ALL] 🔐 Sentinel '{uid}' given Matrix credentials.")
+
+            # === CASE 3: Standard Agent ===
+            else:
                 self.assign_identity_token_to_node(uid, matrix_priv_obj, encryption_enabled, force=force)
 
     def assign_identity_token_to_node(self, uid, matrix_priv_obj, encryption_enabled=True, force=False, replace_keys:dict={}):
